@@ -5,7 +5,8 @@ This repository provides a workflow for supervised fine-tuning (SFT) and evaluat
 ## Setup
 
 0. Create env called "together"
-```conda create -n together python=3.10 -y
+```bash
+conda create -n together python=3.10 -y
 
 # Activate it
 conda activate together
