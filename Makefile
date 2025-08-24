@@ -57,7 +57,7 @@ STANCE_THRESH       ?= 0.3          # for OVR PRF binning in eval (±0.3)
 EPS                 ?= 1e-6         # stance exact-match tolerance in eval
 
 # ---- Together / training hyperparams ----
-MODEL               ?= meta-llama/Meta-Llama-3.1-8B-Instruct-Reference
+MODEL               ?= openai/gpt-oss-120b
 N_EPOCHS            ?= 2
 BATCH_SIZE          ?= 8
 LR                  ?= 1e-4
@@ -66,8 +66,8 @@ SUFFIX              ?= tiktok-sft-v1
 WATCH               ?= 1            # 1 = watch job progress, 0 = don't
 
 # For evaluation
-BASE_MODEL          ?= meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo
-FT_MODEL            ?=               # e.g. your-namespace/Meta-Llama-3.1-8B-...-tiktok-sft-v1-xxxxx
+BASE_MODEL          ?= openai/gpt-oss-120b
+FT_MODEL            ?= 
 CONCURRENCY         ?= 4
 MAX_TOKENS          ?= 128
 TEMP                ?= 0.0

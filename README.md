@@ -1,28 +1,58 @@
 # Fine-Tuning and Evaluation Workflow
 
-This repository provides a workflow for supervised fine-tuning (SFT) and evaluation of language models using [Together.ai](https://www.together.ai). The workflow supports uploading training/validation data, launching fine-tuning jobs, and running evaluation scripts to compare model performance.
+This repo provides a clean workflow for supervised fine-tuning (SFT) and evaluation of language models using [Together.ai](https://www.together.ai). It supports uploading data, launching fine-tuning jobs, and evaluating base vs. fine-tuned models.
 
 ## Setup
 
-0. Create env called "together"
+0) Create a Python env
+
 ```bash
 conda create -n together python=3.10 -y
-
-# Activate it
 conda activate together
 ```
 
-1. Install dependencies:
+1) Install deps
 
 ```bash
-pip install together pandas scikit-learn
+pip install together pandas scikit-learn scipy tqdm
 ```
 
-2. Export your Together API key:
+2) Export your Together API key
 
 ```bash
 export TOGETHER_API_KEY=your_api_key_here
 ```
+
+---
+
+## Data format (expected)
+
+Validation (and train) files are JSONL. Each line contains an OpenAI-style chat session. The **last** message is the gold assistant JSON:
+
+```json
+{
+  "messages": [
+    {"role":"system","content":"You are a meticulous labeling assistant... (format rules here)"},
+    {"role":"user","content":"Transcript: ..."},
+    {"role":"assistant","content":"{\"china_stance_score\":0.1,\"china_sensitive\":\"no\",\"collective_action\":\"no\",\"languages\":[\"english\"]}"}
+  ]
+}
+```
+
+**Schema (assistant JSON)**
+
+```json
+{
+  "china_stance_score": "float in [-1,1]",
+  "china_sensitive": "yes | no | cannot_determine",
+  "collective_action": "yes | no | cannot_determine",
+  "languages": ["english","mandarin","spanish","other","no_language"]
+}
+```
+
+The evaluation code hides the final gold assistant and sends the rest as the prompt.
+
+---
 
 ## Training
 
@@ -34,71 +64,157 @@ make train
 
 This uses `upload_and_train.py` to:
 - Upload `data/train_BAL.jsonl` and `data/val_BAL.jsonl`
-- Create a fine-tuning job with Together.ai
+- Launch a fine-tuning job on Together.ai
 
-### Example Custom Run
-
-```bash
-python upload_and_train.py   --train data/custom_train.jsonl   --val data/custom_val.jsonl   --model my-org/My-Model-Base   --suffix my-experiment-v1   --epochs 3   --batch-size 16   --lr 5e-5
-```
-
-## Evaluation
-
-Evaluate a base model and optionally a fine-tuned model on validation data:
+### Custom run
 
 ```bash
-make eval
+python upload_and_train.py   --train data/custom_train.jsonl   --val   data/custom_val.jsonl   --model my-org/My-Model-Base   --suffix my-experiment-v1   --epochs 3 --batch-size 16 --lr 5e-5
 ```
 
-This runs `eval_model_perf_val_jsonl.py` which:
-- Loads `data/val.jsonl`
-- Hides the gold assistant message
-- Queries a model for predictions
-- Parses JSON output and scores:
-  - JSON parse rate
-  - Exact match (all fields)
-  - Per-field precision/recall/F1
-  - Per-example predictions
+---
 
-### Example: Base vs. Fine-Tuned Model
+## Evaluation (refactored: infer → parse → score)
+
+Evaluation is split into three small scripts so you can rerun parsing/scoring without re-hitting the LLM.
+
+### 1) Inference: hit the LLM and save **raw outputs**
 
 ```bash
-python eval_model_perf_val_jsonl.py   --val-file data/val.jsonl   --base-model my-org/My-Model-Base   --ft-model my-org/My-Model-Base-my-experiment-v1-123456   --concurrency 4   --temperature 0   --dump-csv results/preds.csv
+python infer.py   --val-file data/val_BAL.jsonl   --model openai/gpt-oss-120b   --out out/preds_base.raw.jsonl   --concurrency 4 --temperature 0 --max-tokens 128   --retries 5 --base-sleep 1.0 --warmup 2
 ```
 
-This produces console output plus per-example CSVs for both base and fine-tuned models.
+- Uses Together SDK (`choices[0].message.content` only).
+- `--warmup` sends a couple tiny calls first (useful for cold FT endpoints).
+- `--resume` will skip already completed rows if you rerun.
 
-## Makefile Commands
-
-- **`make train`** → Upload files & start training job
-- **`make eval`** → Evaluate models on `data/val.jsonl`
-- **`make help`** → Show available commands
-
-### Example Variants
-
-Run with custom hyperparameters:
+Repeat for your FT model:
 
 ```bash
-make train TRAIN=data/custom_train.jsonl VAL=data/custom_val.jsonl MODEL=my-org/My-Model-Base EPOCHS=3 BATCH=16 LR=5e-5
+python infer.py   --val-file data/val_BAL.jsonl   --model solomonmessing_ddea/gpt-oss-120b-tiktok-sft-gptoss120b-64d918c9   --out out/preds_ft.raw.jsonl   --concurrency 4 --temperature 0 --max-tokens 128   --retries 5 --base-sleep 1.0 --warmup 2
 ```
 
-Evaluate only the base model:
+### 2) Parse: extract/validate JSON
 
 ```bash
-make eval VAL=data/val.jsonl BASE=my-org/My-Model-Base
+python parse.py   --raw out/preds_base.raw.jsonl   --out out/preds_base.parsed.jsonl   --print-bad 5
 ```
 
-Evaluate both base and fine-tuned models:
+- Robustly extracts JSON (whole, code-fenced tail, or last balanced `{...}`).
+- Writes a `bad_outputs.log` file with raw failures.
+
+Do the same for FT:
 
 ```bash
-make eval VAL=data/val.jsonl BASE=my-org/My-Model-Base FT=my-org/My-Model-Base-my-experiment-v1-123456
+python parse.py   --raw out/preds_ft.raw.jsonl   --out out/preds_ft.parsed.jsonl   --print-bad 5
 ```
+
+### 3) Score: compute metrics and compare FT–BASE
+
+```bash
+python score.py   --val-file data/val_BAL.jsonl   --preds out/preds_base.parsed.jsonl   --stance-thresh 0.3 --eps 1e-6   --dump-csv out/base_preds.csv
+```
+
+Compare against FT:
+
+```bash
+python score.py   --val-file data/val_BAL.jsonl   --preds   out/preds_base.parsed.jsonl   --compare out/preds_ft.parsed.jsonl
+```
+
+**Outputs shown**
+- JSON parse rate
+- Exact match (all fields within `eps`)
+- Per-field precision/recall/F1 (including one-vs-rest stance thresholds)
+- Regression metrics for `china_stance_score` (MAE/RMSE/R²/Pearson/Spearman)
+- Optional per-example CSV
+
+---
+
+## Makefile (optional)
+
+You can wire the new 3-step flow like this:
+
+```makefile
+VAL ?= data/val_BAL.jsonl
+BASE ?= openai/gpt-oss-120b
+FT ?=
+
+OUT_DIR ?= out
+BASE_RAW  := $(OUT_DIR)/preds_base.raw.jsonl
+BASE_PAR  := $(OUT_DIR)/preds_base.parsed.jsonl
+FT_RAW    := $(OUT_DIR)/preds_ft.raw.jsonl
+FT_PAR    := $(OUT_DIR)/preds_ft.parsed.jsonl
+
+.PHONY: help
+help:
+	@echo "make infer-base     # run inference for base model"
+	@echo "make infer-ft       # run inference for fine-tuned model"
+	@echo "make parse-base     # parse base raw outputs"
+	@echo "make parse-ft       # parse ft raw outputs"
+	@echo "make score-base     # score base only"
+	@echo "make score-compare  # compare ft vs base"
+
+$(OUT_DIR):
+	mkdir -p $(OUT_DIR)
+
+infer-base: $(OUT_DIR)
+	python infer.py --val-file $(VAL) --model $(BASE) --out $(BASE_RAW) \
+	  --concurrency 4 --temperature 0 --max-tokens 128 --retries 5 --base-sleep 1.0 --warmup 2
+
+infer-ft: $(OUT_DIR)
+	python infer.py --val-file $(VAL) --model $(FT) --out $(FT_RAW) \
+	  --concurrency 4 --temperature 0 --max-tokens 128 --retries 5 --base-sleep 1.0 --warmup 2
+
+parse-base: $(OUT_DIR)
+	python parse.py --raw $(BASE_RAW) --out $(BASE_PAR) --print-bad 5
+
+parse-ft: $(OUT_DIR)
+	python parse.py --raw $(FT_RAW) --out $(FT_PAR) --print-bad 5
+
+score-base:
+	python score.py --val-file $(VAL) --preds $(BASE_PAR) --stance-thresh 0.3 --eps 1e-6 --dump-csv $(OUT_DIR)/base_preds.csv
+
+score-compare:
+	python score.py --val-file $(VAL) --preds $(BASE_PAR) --compare $(FT_PAR) --stance-thresh 0.3 --eps 1e-6
+```
+
+Usage examples:
+
+```bash
+make infer-base
+make parse-base
+make score-base
+
+# if you have an FT model id set in FT=
+make infer-ft
+make parse-ft
+make score-compare
+```
+
+---
+
+## Troubleshooting
+
+- **401 Invalid API key**  
+  Ensure `TOGETHER_API_KEY` is exported in your *current* shell and that the key is valid.
+
+- **503 overloaded / cold FT**  
+  Add `--warmup 2` (or more) to `infer.py`, keep `--retries` and backoff. Re-run with `--resume` if it failed mid-way.
+
+- **0% parse rate**  
+  Inspect `bad_outputs.log`. If the model returns analysis text with no JSON, check your validation set’s **system** message contains strict “JSON-only” instructions, and that you didn’t strip it. The code hides only the **final** gold assistant; it preserves the original prompt.
+
+- **Throughput**  
+  Increase `--concurrency` cautiously (Together may rate-limit). Use lower `--max-tokens` if you don’t need long generations.
+
+---
 
 ## Notes
 
-- The code is not tied to any specific model family (e.g., Llama). Swap in any model supported by Together.ai.
-- Ensure validation data matches the expected JSON schema for evaluation.
-- Fine-tuning may take hours depending on model size and configuration.
+- The workflow is model-agnostic; swap any Together-hosted chat model id.
+- Ensure your validation data adheres to the schema above.
+- FT training time depends on model size, tokens/epoch, hardware.
 
 ---
-Maintainer: Sol
+
+**Maintainer:** Sol
