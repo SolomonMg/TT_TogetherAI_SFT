@@ -1,90 +1,101 @@
-#!/usr/bin/env python3
 """
-infer.py — run a Together model over a validation JSONL and dump raw outputs.
-
-Example:
 python infer.py \
   --val-file data/val_BAL.jsonl \
   --model openai/gpt-oss-120b \
   --out out/preds_base.raw.jsonl \
-  --concurrency 4 --temperature 0 \
-  --max-tokens 512 --max-tokens-cap 2048 \
-  --retries 5 --base-sleep 1.0 --warmup 1 \
-  --reasoning-effort low --limit 10
+  --concurrency 4 --temperature 0 --max-tokens 512 \
+  --retries 5 --base-sleep 1.0 --warmup 2 \
+  --retry-on-trunc --growth 2.0 --max-tokens-cap 512 \
+  --append-enforcer --transport http
+
+  python infer.py \
+  --val-file data/val_BAL.jsonl \
+  --model solomonmessing_ddea/gpt-oss-120b-tiktok-sft-gptoss120b-64d918c9 \
+  --out out/preds_ft.raw.jsonl \
+  --concurrency 4 --temperature 0 --max-tokens 512 \
+  --retries 5 --base-sleep 1.0 --warmup 2 \
+  --retry-on-trunc --growth 2.0 --max-tokens-cap 512 \
+  --append-enforcer --transport http
 
 """
 
-import os, sys, json, re, time, argparse, asyncio
-from typing import List, Dict, Tuple
+#!/usr/bin/env python3
+import os, sys, json, re, time, argparse, asyncio, logging
+from typing import List, Dict, Tuple, Optional
+
+import requests
 from together import Together
 
-JSON_ONLY_MSG = {
-    "role": "system",
-    "content": (
-        "Return ONLY a minified JSON object with exactly these keys: "
-        "china_stance_score, china_sensitive, collective_action, languages. "
-        "No extra text, no reasoning, no code fences."
-    ),
-}
+TOGETHER_CHAT_URL = "https://api.together.xyz/v1/chat/completions"
 
-FALLBACK_SCHEMA_MSG = {
-    "role": "system",
-    "content": (
-        "You must respond with ONLY a single JSON object with these keys and types: "
-        "{\"china_stance_score\": float in [-1,1], "
-        "\"china_sensitive\": \"yes\"|\"no\"|\"cannot_determine\", "
-        "\"collective_action\": \"yes\"|\"no\"|\"cannot_determine\", "
-        "\"languages\": [\"english\",\"mandarin\",\"spanish\",\"other\",\"no_language\"]}. "
-        "No prose. No code fences. Start with '{' and end with '}'."
-    ),
-}
+FORMAT_ENFORCER_TXT = (
+    "Return ONLY a minified JSON object with exactly these keys: "
+    "china_stance_score, china_sensitive, collective_action, languages. "
+    "No extra text."
+)
 
-def load_jsonl(path: str):
+def load_jsonl(path: str) -> List[dict]:
+    out = []
     with open(path, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
+        for line in f:
             line = line.strip()
-            if not line:
-                continue
-            yield i, json.loads(line)
+            if line:
+                out.append(json.loads(line))
+    return out
 
-def prompt_messages(example: dict, add_json_only: bool = True) -> List[Dict[str,str]]:
-    # Hide the gold (last assistant)
-    msgs = example["messages"][:-1]
-    # Keep only role+content
-    msgs = [{"role": m["role"], "content": m["content"]} for m in msgs]
-    if add_json_only:
-        msgs.append(JSON_ONLY_MSG)
+def prompt_messages(example: dict, append_enforcer: bool) -> List[Dict[str, str]]:
+    # Hide gold (last assistant) and keep original user/system roles
+    msgs = [{"role": m["role"], "content": m["content"]} for m in example["messages"][:-1]]
+    if append_enforcer:
+        msgs.append({"role": "system", "content": FORMAT_ENFORCER_TXT})
     return msgs
 
-def user_text_concat(example: dict) -> str:
-    parts = [m.get("content","") for m in example["messages"] if m.get("role") == "user"]
-    return "\n\n".join(parts).strip()
+def _brace_unbalanced(s: str) -> bool:
+    # Quick heuristic: unbalanced curly braces suggests truncation mid-JSON
+    opens = s.count("{")
+    closes = s.count("}")
+    return opens > 0 and closes < opens
 
-def resp_text_content_only(resp) -> str:
-    # 1) choices[0].message.content
+def _strip_code_fence(text: str) -> str:
+    m = re.search(r"```(?:json|JSON)?\s*([\s\S]*?)\s*```", text, re.M)
+    return m.group(1) if m else text
+
+def looks_truncated(text: str, finish_reason: Optional[str]) -> bool:
+    if finish_reason and finish_reason.lower() == "length":
+        return True
+    if not isinstance(text, str) or not text:
+        return True
+    s = _strip_code_fence(text)
+    if _brace_unbalanced(s):
+        return True
+    tail = s.rstrip()
+    if tail.endswith(("{", "[", ":", ",")):
+        return True
+    return False
+
+def get_finish_reason_sdk(resp) -> Optional[str]:
+    try:
+        return resp.choices[0].finish_reason
+    except Exception:
+        return None
+
+def get_text_sdk(resp) -> str:
+    # Try multiple shapes for Together SDK
     try:
         t = resp.choices[0].message.content
         if isinstance(t, str) and t:
             return t
     except Exception:
         pass
-    # 2) choices[0].message dict-like
-    try:
-        msg = resp.choices[0].message
-        if msg and isinstance(msg, dict):
-            t = msg.get("content")
-            if isinstance(t, str) and t:
-                return t
-    except Exception:
-        pass
-    # 3) choices[0].text (some backends)
     try:
         t = resp.choices[0].text
         if isinstance(t, str) and t:
             return t
     except Exception:
         pass
-    # 4) very old shapes
+    t = getattr(resp, "output_text", None)
+    if isinstance(t, str) and t:
+        return t
     try:
         o = getattr(resp, "output", None)
         if isinstance(o, list) and o:
@@ -95,209 +106,198 @@ def resp_text_content_only(resp) -> str:
         pass
     return ""
 
-async def call_once(loop, client: Together, model: str, messages: list,
-                    temperature: float, max_tokens: int,
-                    response_format_json: bool, timeout_s: float,
-                    reasoning_effort: str | None) -> str:
-    def _do():
-        kwargs = dict(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stream=False,
-        )
-        if response_format_json:
-            kwargs["response_format"] = {"type": "json_object"}
-        if reasoning_effort:
-            # Ignored by models that don't support it; safe to send.
-            kwargs["reasoning"] = {"effort": reasoning_effort}
-        resp = client.chat.completions.create(**kwargs)
-        return resp_text_content_only(resp)
+def get_text_http(rjson: dict) -> Tuple[str, Optional[str]]:
+    try:
+        ch = rjson["choices"][0]
+        txt = ch.get("message", {}).get("content") or ch.get("text") or ""
+        fr = ch.get("finish_reason")
+        return txt or "", fr
+    except Exception:
+        return "", None
 
+async def call_sdk(client: Together, model: str, messages: List[Dict[str,str]],
+                   max_tokens: int, temperature: float, timeout_s: float) -> Tuple[str, Optional[str]]:
+    loop = asyncio.get_running_loop()
+    def _do():
+        resp = client.chat.completions.create(
+            model=model, messages=messages, temperature=temperature,
+            max_tokens=max_tokens, stream=False
+        )
+        return get_text_sdk(resp), get_finish_reason_sdk(resp)
     return await asyncio.wait_for(loop.run_in_executor(None, _do), timeout=timeout_s)
 
-async def infer_once(loop, client, model, ex_idx: int, example: dict,
-                     temperature: float, max_tokens: int,
-                     max_tokens_cap: int,
-                     retries: int, base_sleep: float,
-                     per_call_timeout: float, response_format_json: bool,
-                     reasoning_effort: str | None) -> dict:
-    """
-    Two dimensions of retry:
-      - API retries (errors/timeouts)
-      - Token budget growth (if no '{' found, double max_tokens up to cap)
-    """
-    msgs = prompt_messages(example, add_json_only=True)
+async def call_http(model: str, messages: List[Dict[str,str]],
+                    max_tokens: int, temperature: float, timeout_s: float) -> Tuple[str, Optional[str]]:
+    loop = asyncio.get_running_loop()
+    headers = {
+        "Authorization": f"Bearer {os.environ['TOGETHER_API_KEY']}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    def _do():
+        r = requests.post(TOGETHER_CHAT_URL, headers=headers, json=payload, timeout=(10, timeout_s))
+        if r.status_code == 401:
+            raise RuntimeError(f"401 Unauthorized: {r.text}")
+        if r.status_code >= 500:
+            raise RuntimeError(f"{r.status_code} Server error: {r.text[:200]}")
+        r.raise_for_status()
+        rjson = r.json()
+        return get_text_http(rjson)
+    return await asyncio.wait_for(loop.run_in_executor(None, _do), timeout=timeout_s)
 
+async def one_example(idx: int,
+                      model: str,
+                      ex: dict,
+                      transport: str,
+                      client: Optional[Together],
+                      temperature: float,
+                      max_tokens: int,
+                      retries: int,
+                      base_sleep: float,
+                      timeout_s: float,
+                      retry_on_trunc: bool,
+                      growth: float,
+                      max_tokens_cap: int,
+                      append_enforcer: bool) -> dict:
+    msgs = prompt_messages(ex, append_enforcer=append_enforcer)
+    cur_tokens = max_tokens
     attempt = 0
-    delay = base_sleep
-    while attempt <= retries:
+    while True:
         attempt += 1
         t0 = time.time()
         try:
-            curr_max_tokens = max_tokens
-            # token-growth attempts
-            while True:
-                text = await call_once(
-                    loop, client, model, msgs, temperature, curr_max_tokens,
-                    response_format_json, per_call_timeout, reasoning_effort
-                )
-                if "{" in text:
-                    return {
-                        "idx": ex_idx,
-                        "raw": text,
-                        "attempt": attempt,
-                        "latency_s": round(time.time() - t0, 3),
-                        "model": model,
-                        "used_max_tokens": curr_max_tokens,
-                    }
+            if transport == "sdk":
+                text, fr = await call_sdk(client, model, msgs, cur_tokens, temperature, timeout_s)
+            else:
+                text, fr = await call_http(model, msgs, cur_tokens, temperature, timeout_s)
+            latency = time.time() - t0
+            truncated = looks_truncated(text, fr) if retry_on_trunc else False
+            if truncated and attempt <= retries:
+                # Re-ask WITH a hard instruction to re-emit only the JSON
+                msgs = msgs + [{
+                    "role": "system",
+                    "content": "Your previous response was cut off or included analysis. "
+                               "Re-emit ONLY the final minified JSON object from the beginning. No analysis."
+                }]
+                cur_tokens = min(int(cur_tokens * growth), max_tokens_cap)
+                await asyncio.sleep(base_sleep * attempt)
+                continue
 
-                # Try same context with a very explicit “JSON ONLY” poke
-                msgs_b = msgs + [{"role":"user","content":"JSON ONLY. No analysis. No code fences. Start with '{'."}]
-                text_b = await call_once(
-                    loop, client, model, msgs_b, temperature, curr_max_tokens,
-                    response_format_json, per_call_timeout, reasoning_effort
-                )
-                if "{" in text_b:
-                    return {
-                        "idx": ex_idx,
-                        "raw": text_b,
-                        "attempt": attempt,
-                        "latency_s": round(time.time() - t0, 3),
-                        "model": model,
-                        "used_max_tokens": curr_max_tokens,
-                    }
-
-                # If still no JSON, grow the token budget (model likely rambled first)
-                next_tokens = min(curr_max_tokens * 2, max_tokens_cap)
-                if next_tokens <= curr_max_tokens:
-                    break  # can't grow further this attempt
-
-                curr_max_tokens = next_tokens
-
-            # Minimal fallback: schema + user-only
-            user_txt = user_text_concat(example)
-            msgs_c = [FALLBACK_SCHEMA_MSG, {"role":"user","content": user_txt}]
-            text_c = await call_once(
-                loop, client, model, msgs_c, temperature, curr_max_tokens,
-                response_format_json, per_call_timeout, reasoning_effort
-            )
             return {
-                "idx": ex_idx,
-                "raw": text_c,
+                "idx": idx,
+                "raw": text,
                 "attempt": attempt,
-                "latency_s": round(time.time() - t0, 3),
+                "latency_s": round(latency, 3),
                 "model": model,
-                "used_max_tokens": curr_max_tokens,
+                "finish_reason": fr,
+                "truncated": bool(truncated),
+                "max_tokens_used": cur_tokens
             }
-
         except Exception as e:
-            err = repr(e)
-            if attempt > retries:
+            latency = time.time() - t0
+            if attempt >= retries:
                 return {
-                    "idx": ex_idx,
-                    "raw": f"<<REQUEST FAILED: {err}>>",
+                    "idx": idx,
+                    "raw": f"<<REQUEST FAILED: {e}>>",
                     "attempt": attempt,
-                    "latency_s": round(time.time() - t0, 3),
+                    "latency_s": round(latency, 3),
                     "model": model,
-                    "used_max_tokens": max_tokens,
+                    "finish_reason": None,
+                    "truncated": None,
+                    "max_tokens_used": cur_tokens
                 }
+            await asyncio.sleep(base_sleep * attempt)
 
-        await asyncio.sleep(delay)
-        delay = min(delay * 2, 16.0)
-
-async def main(val_file: str, model: str, out: str,
-               concurrency: int = 4, temperature: float = 0.0,
-               max_tokens: int = 512, max_tokens_cap: int = 2048,
-               retries: int = 3, base_sleep: float = 1.0,
-               per_call_timeout: float = 60.0, limit: int = 0,
-               warmup: int = 0, response_format_json: bool = True,
-               reasoning_effort: str | None = "low"):
+async def main(val_file: str,
+               model: str,
+               out_path: str,
+               concurrency: int,
+               temperature: float,
+               max_tokens: int,
+               retries: int,
+               base_sleep: float,
+               limit: int,
+               transport: str,
+               timeout_s: float,
+               warmup: int,
+               retry_on_trunc: bool,
+               growth: float,
+               max_tokens_cap: int,
+               append_enforcer: bool):
     if not os.environ.get("TOGETHER_API_KEY"):
         raise SystemExit("Please export TOGETHER_API_KEY")
-    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    data = load_jsonl(val_file)
+    n = min(limit, len(data)) if limit else len(data)
+    data = data[:n]
+    print(f"Loaded {n} examples")
 
-    client = Together(api_key=os.environ["TOGETHER_API_KEY"])
+    client = Together(api_key=os.environ["TOGETHER_API_KEY"]) if transport == "sdk" else None
 
-    # load data
-    data = []
-    for i, ex in load_jsonl(val_file):
-        data.append((i, ex))
-        if limit and len(data) >= limit:
-            break
-
-    # optional warmup
-    if warmup > 0:
+    # Warmup tiny probes (best-effort)
+    for _ in range(max(0, warmup)):
         try:
-            msgs = [
-                {"role": "system", "content": "Return JSON only."},
-                {"role": "user", "content": "{\"china_stance_score\":0.0,\"china_sensitive\":\"no\",\"collective_action\":\"no\",\"languages\":[\"english\"]}"}
-            ]
-            for _ in range(warmup):
-                _ = client.chat.completions.create(
-                    model=model, messages=msgs, temperature=0, max_tokens=8, stream=False
-                )
+            msgs = [{"role":"system","content":"Return: {\"china_stance_score\":0,\"china_sensitive\":\"no\",\"collective_action\":\"no\",\"languages\":[\"english\"]}"}]
+            if transport == "sdk":
+                await call_sdk(client, model, msgs, 16, 0.0, timeout_s=10)
+            else:
+                await call_http(model, msgs, 16, 0.0, timeout_s=10)
         except Exception:
             pass
 
-    loop = asyncio.get_running_loop()
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     sem = asyncio.Semaphore(max(1, concurrency))
-
-    async def run_slot(ex_idx, ex):
+    async def runner(i, ex):
         async with sem:
-            return await infer_once(
-                loop, client, model, ex_idx, ex, temperature,
-                max_tokens, max_tokens_cap, retries, base_sleep,
-                per_call_timeout, response_format_json, reasoning_effort
-            )
+            return await one_example(
+                idx=i, model=model, ex=ex, transport=transport, client=client,
+                temperature=temperature, max_tokens=max_tokens, retries=retries,
+                base_sleep=base_sleep, timeout_s=timeout_s,
+                retry_on_trunc=retry_on_trunc, growth=growth, max_tokens_cap=max_tokens_cap,
+                append_enforcer=append_enforcer)
 
-    tasks = [asyncio.create_task(run_slot(i, ex)) for (i, ex) in data]
-    n = len(tasks)
-    done = 0
+    t0 = time.time()
+    results = await asyncio.gather(*[runner(i, ex) for i, ex in enumerate(data)])
+    dt = time.time() - t0
 
-    with open(out, "w", encoding="utf-8") as fh:
-        for coro in asyncio.as_completed(tasks):
-            rec = await coro
-            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            done += 1
-            if done % 10 == 0 or done == n:
-                print(f"[infer] {done}/{n} written -> {out}", file=sys.stderr)
+    with open(out_path, "w", encoding="utf-8") as f:
+        for r in results:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"Wrote {len(results)} lines to {out_path} in {dt:.2f}s")
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--val-file", required=True)
     ap.add_argument("--model", required=True)
-    ap.add_argument("--out", required=True, help="Path to write raw outputs (.jsonl)")
+    ap.add_argument("--out", required=True)
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--temperature", type=float, default=0.0)
-    ap.add_argument("--max-tokens", type=int, default=512)
-    ap.add_argument("--max-tokens-cap", type=int, default=2048,
-                    help="Upper cap for dynamic token growth when no JSON is found.")
-    ap.add_argument("--retries", type=int, default=3)
+    ap.add_argument("--max-tokens", type=int, default=128)
+    ap.add_argument("--retries", type=int, default=5, help="transport/truncation retries")
     ap.add_argument("--base-sleep", type=float, default=1.0)
-    ap.add_argument("--per-call-timeout", type=float, default=60.0)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--transport", choices=["sdk","http"], default="http")
+    ap.add_argument("--per-call-timeout", type=float, default=60.0)
     ap.add_argument("--warmup", type=int, default=0)
-    ap.add_argument("--no-response-format", action="store_true",
-                    help="Disable response_format={'type':'json_object'}")
-    ap.add_argument("--reasoning-effort", choices=["low","medium","high","none"], default="low",
-                    help="Send reasoning={'effort': ...}. 'none' to disable.")
-    args = ap.parse_args()
 
+    # NEW: truncation-aware retry controls
+    ap.add_argument("--retry-on-trunc", action="store_true", help="Retry if output looks truncated")
+    ap.add_argument("--max-tokens-cap", type=int, default=512, help="Upper bound for token growth")
+    ap.add_argument("--growth", type=float, default=1.8, help="Growth factor for max_tokens on truncation")
+    ap.add_argument("--append-enforcer", action="store_true",
+                    help="Append a JSON-only system nudge to each prompt")
+
+    args = ap.parse_args()
     asyncio.run(main(
-        val_file=args.val_file,
-        model=args.model,
-        out=args.out,
-        concurrency=args.concurrency,
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
-        max_tokens_cap=args.max_tokens_cap,
-        retries=args.retries,
-        base_sleep=args.base_sleep,
-        per_call_timeout=args.per_call_timeout,
-        limit=args.limit,
-        warmup=args.warmup,
-        response_format_json=(not args.no_response_format),
-        reasoning_effort=(None if args.reasoning_effort == "none" else args.reasoning_effort),
-    ))
+        val_file=args.val_file, model=args.model, out_path=args.out,
+        concurrency=args.concurrency, temperature=args.temperature,
+        max_tokens=args.max_tokens, retries=args.retries, base_sleep=args.base_sleep,
+        limit=args.limit, transport=args.transport, timeout_s=args.per_call_timeout,
+        warmup=args.warmup, retry_on_trunc=args.retry_on_trunc,
+        growth=args.growth, max_tokens_cap=args.max_tokens_cap,
+        append_enforcer=args.append_enforcer))

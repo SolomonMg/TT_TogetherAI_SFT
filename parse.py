@@ -1,82 +1,72 @@
 #!/usr/bin/env python3
 """
-parse.py — extract the final JSON object from model outputs produced by infer.py.
+parse.py — tolerant JSON extractor for model outputs
 
-Usage:
-  python parse.py \
-    --raw out/preds_base.raw.jsonl \
-    --out out/preds_base.parsed.jsonl \
-    --print-bad 5
+Purpose
+-------
+Takes raw model outputs produced by infer.py (JSONL with fields like
+{"idx": ..., "raw": "...", ...}), extracts the assistant's final JSON,
+lightly sanitizes common glitches, validates against the codebook schema,
+and writes a parsed JSONL with either the parsed object or a failure.
 
-Input (from infer.py) is a JSONL where each line contains at least:
-  {"idx": <int>, "raw": "<model_text_or_tokens_rendered>" ...}
-
-Output JSONL lines look like:
-  {"idx": 0, "parsed": true, "raw": "...", "json": {...}}
-or, on failure:
-  {"idx": 0, "parsed": false, "raw": "...", "json": null}
+Usage
+-----
+python parse.py \
+  --raw out/preds_base.raw.jsonl \
+  --out out/preds_base.parsed.jsonl \
+  --print-bad 5
 """
 
-import argparse, json, re, os, sys
-from typing import Tuple
-
-# --- Regex helpers (code-fence, tail JSON, fallback to last balanced) ---
-_CODEFENCE_RE = re.compile(r"```(?:json|JSON)?\s*([\s\S]*?)\s*```", re.M)
-_TAIL_JSON_RE = re.compile(r"(\{[\s\S]*\})\s*$", re.S)
+import os, sys, json, re, argparse
 
 ALLOWED_YES_NO_CD = {"yes","no","cannot_determine"}
-ALLOWED_LANGS = {"english","mandarin","spanish","other","no_language"}
-REQ_KEYS = {"china_stance_score","china_sensitive","collective_action","languages"}
+ALLOWED_LANGS     = ["english","mandarin","spanish","other","no_language"]
+REQ_KEYS          = {"china_stance_score","china_sensitive","collective_action","languages"}
 
-def _strip_code_fence_or_return(s: str) -> str:
-    m = _CODEFENCE_RE.search(s)
-    return m.group(1) if m else s
+# --- helpers -------------------------------------------------------------
 
-def _valid_schema(obj: dict) -> bool:
+def load_jsonl(path: str):
+    out = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\r\n")
+            if line:
+                out.append(json.loads(line))
+    return out
+
+def ok_langs(x):
+    return (isinstance(x, list) and len(x) > 0
+            and all(isinstance(s, str) and s in ALLOWED_LANGS for s in x)
+            and (("no_language" not in x) or (len(x) == 1)))
+
+def valid_schema(y: dict) -> bool:
+    if not isinstance(y, dict): return False
+    if set(y.keys()) != REQ_KEYS: return False
     try:
-        if set(obj.keys()) != REQ_KEYS:
-            return False
-        s = float(obj["china_stance_score"])
-        if not (-1.0 <= s <= 1.0):
-            return False
-        if obj["china_sensitive"] not in ALLOWED_YES_NO_CD:
-            return False
-        if obj["collective_action"] not in ALLOWED_YES_NO_CD:
-            return False
-        langs = obj["languages"]
-        if not isinstance(langs, list) or not langs or any(l not in ALLOWED_LANGS for l in langs):
-            return False
-        if "no_language" in langs and len(langs) != 1:
-            return False
-        return True
+        s = float(y.get("china_stance_score"))
     except Exception:
         return False
+    if not (-1.0 <= s <= 1.0): return False
+    if y.get("china_sensitive") not in ALLOWED_YES_NO_CD: return False
+    if y.get("collective_action") not in ALLOWED_YES_NO_CD: return False
+    if not ok_langs(y.get("languages")): return False
+    return True
 
-def _try_whole_json(s: str):
-    try:
-        obj = json.loads(s)
-        return obj if isinstance(obj, dict) and _valid_schema(obj) else None
-    except Exception:
-        return None
+# strip code fences if present
+_CODEFENCE_RE = re.compile(r"```(?:json|JSON)?\s*([\s\S]*?)\s*```", re.M)
 
-def _try_tail_json(s: str):
-    m = _TAIL_JSON_RE.search(s)
-    if not m:
-        return None
-    try:
-        obj = json.loads(m.group(1))
-        return obj if isinstance(obj, dict) and _valid_schema(obj) else None
-    except Exception:
-        return None
+def _strip_code_fence(text: str) -> str:
+    m = _CODEFENCE_RE.search(text)
+    return m.group(1) if m else text
 
+# scan for balanced {...} blocks and return the LAST that parses
 def _last_balanced_json_anywhere(s: str):
     last = None
     n = len(s)
     i = 0
     while i < n:
         i = s.find('{', i)
-        if i == -1:
-            break
+        if i == -1: break
         depth = 0
         in_str = False
         esc = False
@@ -99,12 +89,7 @@ def _last_balanced_json_anywhere(s: str):
                     depth -= 1
                     if depth == 0:
                         cand = s[i:j+1]
-                        try:
-                            obj = json.loads(cand)
-                            if isinstance(obj, dict) and _valid_schema(obj):
-                                last = obj
-                        except Exception:
-                            pass
+                        last = cand
                         i = j + 1
                         break
             j += 1
@@ -112,110 +97,137 @@ def _last_balanced_json_anywhere(s: str):
             break
     return last
 
-def extract_best_json(text: str) -> Tuple[dict, bool]:
-    """Try whole-string, then tail JSON (after stripping code-fence), then last balanced block."""
-    if not isinstance(text, str):
-        return {"invalid": True}, False
+# --- targeted sanitizer for the double-decimal bug ----------------------
 
-    obj = _try_whole_json(text)
-    if obj is not None:
-        return obj, True
+# Only fix the numeric token that follows "china_stance_score":
+_FIX_SCORE_DBLDEC_RE = re.compile(
+    r'("china_stance_score"\s*:\s*)(-?\d+\.\d+)\.0+(?=[\s,}])'
+)
 
-    s = _strip_code_fence_or_return(text)
-
-    obj = _try_tail_json(s)
-    if obj is not None:
-        return obj, True
-
-    obj = _last_balanced_json_anywhere(s)
-    if obj is not None:
-        return obj, True
-
-    return {"invalid": True}, False
-
-# --- IO helpers ---
-def _iter_jsonl(path, limit=0):
-    with open(path, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if limit and i >= limit:
-                break
-            line = line.rstrip("\r\n")
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except Exception:
-                # If a line isn't JSON, still pass it through as raw text
-                yield {"idx": i, "raw": line}
-
-def _first_text_field(rec: dict) -> str:
+def _fix_china_stance_score_decimal_bug(s: str) -> str:
     """
-    Be generous about where the model text might live.
-    Prefer 'raw', then 'content', then 'output_text', else stringify.
+    Fixes cases like: "china_stance_score": -0.6.0  ->  -0.6
+    Only acts on the value after the china_stance_score key.
+    Leaves scientific notation (e.g., -8e-1) untouched.
     """
-    for k in ("raw", "content", "output_text", "text"):
-        v = rec.get(k)
-        if isinstance(v, str) and v:
-            return v
-    # Sometimes the entire record is already the raw string
-    if isinstance(rec, str):
-        return rec
-    # Last resort: dump record without breaking Unicode
+    return _FIX_SCORE_DBLDEC_RE.sub(r'\1\2', s)
+
+# Optional: remove trailing commas before } or ]
+_TRAILING_COMMA_RE = re.compile(r',\s*([}\]])')
+def _strip_trailing_commas(s: str) -> str:
+    return _TRAILING_COMMA_RE.sub(r'\1', s)
+
+def try_parse_json_with_fixes(s: str):
+    """Attempt json.loads; if it fails, apply small safe fixes then retry."""
     try:
-        return json.dumps(rec, ensure_ascii=False)
+        return json.loads(s)
     except Exception:
-        return str(rec)
+        pass
+    s2 = _fix_china_stance_score_decimal_bug(s)
+    if s2 != s:
+        try:
+            return json.loads(s2)
+        except Exception:
+            pass
+    s3 = _strip_trailing_commas(s2)
+    if s3 != s2:
+        try:
+            return json.loads(s3)
+        except Exception:
+            pass
+    # Give up
+    raise
 
-# --- main logic ---
-def run(raw_path: str, out_path: str, fail_log: str = "bad_outputs.log",
-        print_bad: int = 0, limit: int = 0) -> None:
-    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+def extract_first_valid_json(text: str):
+    """
+    Strategy:
+    1) If whole string parses as JSON -> validate -> return
+    2) Strip code fences; find LAST balanced {...} block -> try parse (+fixes) -> validate
+    Returns (obj, ok:bool, mode:str)
+    """
+    if not isinstance(text, str) or not text:
+        return {"invalid": True}, False, "none"
 
-    n = 0
-    parsed = 0
-    bad_blocks = []
+    # 1) Whole-string JSON
+    try:
+        obj = json.loads(text)
+        if valid_schema(obj):
+            return obj, True, "strict"
+    except Exception:
+        pass
 
-    with open(out_path, "w", encoding="utf-8") as out_f, \
-         open(fail_log, "w", encoding="utf-8") as bad_f:
+    # 2) Tail/last balanced block, with small tolerance fixes
+    s = _strip_code_fence(text)
+    cand = _last_balanced_json_anywhere(s)
+    if cand:
+        try:
+            obj = try_parse_json_with_fixes(cand)
+            if valid_schema(obj):
+                return obj, True, "salvaged"
+        except Exception:
+            pass
 
-        for rec in _iter_jsonl(raw_path, limit=limit):
-            n += 1
-            idx = rec.get("idx", n-1)
-            raw = _first_text_field(rec)
+    return {"invalid": True}, False, "none"
 
-            obj, ok = extract_best_json(raw)
-            if ok:
-                parsed += 1
-                out_f.write(json.dumps({"idx": idx, "parsed": True, "raw": raw, "json": obj}, ensure_ascii=False) + "\n")
+# --- CLI ---------------------------------------------------------------
+
+def run(raw: str, out: str, print_bad: int = 0):
+    """
+    raw: path to raw outputs JSONL (from infer.py)
+    out: where to write parsed JSONL
+    """
+    raw_recs = load_jsonl(raw)
+    ok = 0
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    bad_log = "data/bad_outputs.log"
+    # truncate log
+    open(bad_log, "w", encoding="utf-8").close()
+
+    with open(out, "w", encoding="utf-8") as fw:
+        for rec in raw_recs:
+            idx = rec.get("idx")
+            text = rec.get("raw", "")
+            obj, parsed, mode = extract_first_valid_json(text)
+            if parsed:
+                ok += 1
+                out_rec = {"idx": idx, "parsed": True, "raw": text, "json": obj}
             else:
-                out_f.write(json.dumps({"idx": idx, "parsed": False, "raw": raw, "json": None}, ensure_ascii=False) + "\n")
-                block = f"IDX={idx}\n{raw}\n---\n"
-                bad_f.write(block)
-                if len(bad_blocks) < max(0, print_bad):
-                    bad_blocks.append(block)
+                out_rec = {"idx": idx, "parsed": False, "raw": text, "json": None}
+                with open(bad_log, "a", encoding="utf-8") as bl:
+                    bl.write(f"IDX={idx}\n{text}\n---\n")
+            fw.write(json.dumps(out_rec, ensure_ascii=False) + "\n")
 
-    print(f"Done. Parsed {parsed}/{n} = {parsed/(n or 1):.3f}")
-    print(f"Wrote: {out_path}")
-    if print_bad and bad_blocks:
-        print(f"\n--- First {min(print_bad, len(bad_blocks))} bad outputs ({fail_log}) ---")
-        for b in bad_blocks:
-            print(b, end="")
+    total = len(raw_recs)
+    rate = ok / total if total else 0.0
+    print(f"\nDone. Parsed {ok}/{total} = {rate:.3f}")
+    print(f"Wrote: {out}")
+
+    if print_bad > 0:
+        if not os.path.exists(bad_log):
+            print("\n(no bad_outputs.log found)")
+        else:
+            print(f"\n--- First {print_bad} bad outputs (bad_outputs.log) ---")
+            shown = 0
+            block = []
+            with open(bad_log, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip() == "---":
+                        print("".join(block).rstrip())
+                        print("---")
+                        shown += 1
+                        block = []
+                        if shown >= print_bad:
+                            break
+                    else:
+                        block.append(line)
+            if shown == 0 and block:
+                print("".join(block).rstrip())
+                print("---")
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    # Accept BOTH flags, map to the same dest so run() sees raw_path
-    ap.add_argument("--raw", dest="raw_path", help="Path to raw model outputs (.jsonl)")
-    ap.add_argument("--raw-path", dest="raw_path", help="Path to raw model outputs (.jsonl)")
-    ap.add_argument("--out", dest="out_path", help="Where to write parsed outputs (.jsonl)")
-    ap.add_argument("--out-path", dest="out_path", help="Where to write parsed outputs (.jsonl)")
-    ap.add_argument("--fail-log", default="bad_outputs.log", help="File to write raw bad outputs")
-    ap.add_argument("--print-bad", type=int, default=0, help="Also echo the first K bad outputs to stdout")
-    ap.add_argument("--limit", type=int, default=0, help="Only parse first N lines (0 = all)")
+    ap.add_argument("--raw", required=True, help="Path to raw model outputs (from infer.py)")
+    ap.add_argument("--out", required=True, help="Where to write parsed JSONL")
+    ap.add_argument("--print-bad", type=int, default=0, help="Show first K bad outputs from bad_outputs.log")
     args = ap.parse_args()
-
-    if not args.raw_path:
-        ap.error("Please provide --raw or --raw-path")
-    if not args.out_path:
-        ap.error("Please provide --out or --out-path")
-
     run(**vars(args))
