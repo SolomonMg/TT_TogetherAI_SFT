@@ -12,6 +12,12 @@ python run_sft.py \
   --n-epochs 2 --batch-size 16 --learning-rate 1e-4 --n-evals 10 \
   --suffix tiktok-sft-gptoss120b 
 
+python run_sft.py \
+  --train-id file-fdd870d6-7244-4c4e-96d4-aa9dcc5d9a44 \
+  --model meta-llama/Meta-Llama-3.1-70B-Instruct-Reference \
+  --n-epochs 2 --batch-size 8 --learning-rate 1e-4 --n-evals 10 \
+  --suffix tiktok-sft-v2
+
 # Upload local files (fresh upload):
 python run_sft.py \
   --train data/train_BAL.jsonl \

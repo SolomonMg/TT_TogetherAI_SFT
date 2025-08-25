@@ -15,7 +15,22 @@ python parse.py \
   --raw out/preds_base.raw.jsonl \
   --out out/preds_base.parsed.jsonl \
   --print-bad 5
-"""
+
+python parse.py \
+  --raw out/preds_ft.raw.jsonl \
+  --out out/preds_ft.parsed.jsonl \
+  --print-bad 5
+
+python parse.py \
+  --raw out/preds_llama3.1-70B.raw.jsonl \
+  --out out/preds_llama3.1-70B.parsed.jsonl \
+  --print-bad 5
+
+python parse.py \
+  --raw out/preds_llama3.3-70B.raw.jsonl \
+  --out out/preds_llama3.3-70B.parsed.jsonl \
+  --print-bad 5
+  """
 
 import os, sys, json, re, argparse
 

@@ -4,11 +4,13 @@
 
 # Example usage: 
 
-# End-to-end pipeline with defaults
-# make all
 
-# specify model: 
-# make eval FT_MODEL=solomonmessing_ddea/Meta-Llama-3.1-8B-Instruct-Reference-tiktok-sft-v2-abc123
+# make full-base VAL=data/val_BAL.jsonl BASE=openai/gpt-oss-120b LIMIT=50 MAX_TOKENS=128
+# make full-ft VAL=data/val_BAL.jsonl FT=solomonmessing_ddea/gpt-oss-120b-tiktok-sft-gptoss120b-64d918c9
+# make full-both FT=solomonmessing_ddea/gpt-oss-120b-tiktok-sft-gptoss120b-64d918c9
+
+make full-base VAL=data/val_BAL.jsonl meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo
+
 
 # Evaluate base vs fine-tuned model together
 # make eval \
@@ -26,145 +28,148 @@
 # make sft SUFFIX=tiktok-sft-v2 N_EPOCHS=3 BATCH_SIZE=16
 
 
+# Makefile — SFT/Eval pipeline (Together.ai)
+# Default goal
+.DEFAULT_GOAL := help
 
-# ---- Paths & files ----
-DATA_DIR            ?= data
-LABELS_RAW          ?= $(DATA_DIR)/china_labeling_sample_all_Jul30.csv
-META_PARQUET        ?= $(DATA_DIR)/china_labeling_sample_all_with_caption.parquet
+# -------- Variables (override via: make target VAR=...) -----------------
+PY              ?= python
+VAL             ?= data/val_BAL.jsonl
+BASE            ?= openai/gpt-oss-120b
+FT              ?=
+OUT             ?= out
 
-LABELS_TRAIN_CSV    ?= $(DATA_DIR)/labels_bal_train.csv
-LABELS_VAL_CSV      ?= $(DATA_DIR)/labels_bal_val.csv
+# Inference knobs
+CONC            ?= 4
+TEMP            ?= 0
+MAX_TOKENS      ?= 256
+RETRIES         ?= 6
+BASE_SLEEP      ?= 1.0
+WARMUP          ?= 2
+TRANSPORT       ?= http           # http|sdk
+LIMIT           ?= 0              # 0 = all
 
-TRAIN_JSONL         ?= $(DATA_DIR)/train_BAL.jsonl
-VAL_JSONL           ?= $(DATA_DIR)/val_BAL.jsonl
+# Parsing / scoring knobs
+PRINT_BAD       ?= 0
+STANCE_THRESH   ?= 0.3
+EPS             ?= 1e-6
 
-# Per-example prediction dumps (written by eval)
-PREDS_BASE_CSV      ?= $(DATA_DIR)/preds_base.csv
-PREDS_FT_CSV        ?= $(DATA_DIR)/preds_ft.csv
+# Derived paths
+BASE_RAW        := $(OUT)/preds_base.raw.jsonl
+BASE_PARSED     := $(OUT)/preds_base.parsed.jsonl
+BASE_CSV        := $(OUT)/base_preds.csv
 
-# ---- Scripts ----
-SPLIT_SCRIPT        ?= sample_labels_duckdb.py
-BUILD_JSONL_SCRIPT  ?= build_finetune_jsonl.py
-VALIDATE_SCRIPT     ?= validate_jsonl.py
-SFT_SCRIPT          ?= run_sft.py
-EVAL_SCRIPT         ?= eval_model_perf_val_jsonl.py
+FT_RAW          := $(OUT)/preds_ft.raw.jsonl
+FT_PARSED       := $(OUT)/preds_ft.parsed.jsonl
+FT_CSV          := $(OUT)/ft_preds.csv
 
-PY                  ?= python
+INFER_FLAGS := \
+  --concurrency $(CONC) \
+  --temperature $(TEMP) \
+  --max-tokens $(MAX_TOKENS) \
+  --retries $(RETRIES) \
+  --base-sleep $(BASE_SLEEP) \
+  --warmup $(WARMUP) \
+  --transport $(TRANSPORT)
 
-# ---- Thresholds / knobs ----
-ANY_THRESH          ?= 0.3          # >0.3 ⇒ yes for sensitive/collective/language
-STANCE_THRESH       ?= 0.3          # for OVR PRF binning in eval (±0.3)
-EPS                 ?= 1e-6         # stance exact-match tolerance in eval
+# -------- Helpers -------------------------------------------------------
+.PHONY: help ensure-out verify-key clean
 
-# ---- Together / training hyperparams ----
-MODEL               ?= openai/gpt-oss-120b
-N_EPOCHS            ?= 2
-BATCH_SIZE          ?= 8
-LR                  ?= 1e-4
-N_EVALS             ?= 10
-SUFFIX              ?= tiktok-sft-v1
-WATCH               ?= 1            # 1 = watch job progress, 0 = don't
-
-# For evaluation
-BASE_MODEL          ?= openai/gpt-oss-120b
-FT_MODEL            ?= 
-CONCURRENCY         ?= 4
-MAX_TOKENS          ?= 128
-TEMP                ?= 0.0
-VAL_LIMIT           ?= 0            # 0 = all rows
-
-# =========================
-# Targets
-# =========================
-.PHONY: help all sample jsonl validate sft eval keys clean
-
-help:
-	@echo ""
+help: ## Show this help
 	@echo "Targets:"
-	@echo "  make all           # sample -> jsonl -> validate"
-	@echo "  make sample        # create balanced train/val CSVs with thresholds"
-	@echo "  make jsonl         # build train/val JSONL from CSV + parquet"
-	@echo "  make validate      # validate JSONL (auto-fix line terminators)"
-	@echo "  make sft           # upload JSONL and launch LoRA SFT on Together"
-	@echo "  make eval          # evaluate base and FT models on VAL"
-	@echo "  make clean         # remove generated preds CSVs"
-	@echo ""
-	@echo "Overridable vars:"
-	@echo "  LABELS_RAW=$(LABELS_RAW)"
-	@echo "  META_PARQUET=$(META_PARQUET)"
-	@echo "  MODEL=$(MODEL), BASE_MODEL=$(BASE_MODEL), FT_MODEL=$(FT_MODEL)"
-	@echo "  ANY_THRESH=$(ANY_THRESH), STANCE_THRESH=$(STANCE_THRESH), EPS=$(EPS)"
-	@echo "  N_EPOCHS=$(N_EPOCHS), BATCH_SIZE=$(BATCH_SIZE), LR=$(LR), N_EVALS=$(N_EVALS)"
-	@echo ""
+	@grep -E '^[a-zA-Z0-9_-]+:.*?##' $(MAKEFILE_LIST) | sed 's/:.*##/: /' | sort
+	@echo
+	@echo "Common overrides:"
+	@echo "  make full-base LIMIT=50 MAX_TOKENS=128"
+	@echo "  make full-ft FT=my-org/My-FT-Model LIMIT=100"
+	@echo
 
-all: sample jsonl validate
+ensure-out:
+	@mkdir -p $(OUT)
 
-# Ensure API key exists for Together-dependent steps
-keys:
-	@test -n "$$TOGETHER_API_KEY" || (echo "ERROR: Please export TOGETHER_API_KEY before running this target." && exit 2)
+verify-key: ## Fail if TOGETHER_API_KEY is not set
+	@test -n "$$TOGETHER_API_KEY" || (echo "ERROR: export TOGETHER_API_KEY first" && exit 1)
 
-# 1) Balanced split for both TRAIN and VAL (numeric inputs; uses --any-thresh)
-sample: $(LABELS_TRAIN_CSV) $(LABELS_VAL_CSV)
-$(LABELS_TRAIN_CSV) $(LABELS_VAL_CSV): $(SPLIT_SCRIPT) $(LABELS_RAW)
-	$(PY) $(SPLIT_SCRIPT) \
-	  --labels-csv $(LABELS_RAW) \
-	  --out-train  $(LABELS_TRAIN_CSV) \
-	  --out-val    $(LABELS_VAL_CSV) \
-	  --train-cap-per-cell 200 \
-	  --val-cap-per-cell   100 \
-	  --train-frac 0.7 \
-	  --any-thresh $(ANY_THRESH) \
-	  --seed 7
+clean: ## Remove outputs
+	rm -rf $(OUT) *.log **/*.log
 
-# 2) Build train/val JSONL with continuous stance_score
-jsonl: $(TRAIN_JSONL) $(VAL_JSONL)
-$(TRAIN_JSONL): $(BUILD_JSONL_SCRIPT) $(LABELS_TRAIN_CSV) $(META_PARQUET)
-	$(PY) $(BUILD_JSONL_SCRIPT) \
-	  --labels-csv  $(LABELS_TRAIN_CSV) \
-	  --meta-parquet $(META_PARQUET) \
-	  --out-jsonl   $(TRAIN_JSONL)
+# -------- Inference (base) ----------------------------------------------
+.PHONY: infer-base parse-base score-base full-base warm-base
 
-$(VAL_JSONL): $(BUILD_JSONL_SCRIPT) $(LABELS_VAL_CSV) $(META_PARQUET)
-	$(PY) $(BUILD_JSONL_SCRIPT) \
-	  --labels-csv  $(LABELS_VAL_CSV) \
-	  --meta-parquet $(META_PARQUET) \
-	  --out-jsonl   $(VAL_JSONL)
+infer-base: verify-key ensure-out ## Run inference on BASE model -> $(BASE_RAW)
+	$(PY) infer.py \
+	  --val-file $(VAL) \
+	  --model $(BASE) \
+	  --out $(BASE_RAW) \
+	  $(INFER_FLAGS) \
+	  --limit $(LIMIT)
 
-# 3) Validate (and auto-fix line terminators in place)
-validate: $(VALIDATE_SCRIPT) $(TRAIN_JSONL) $(VAL_JSONL)
-	$(PY) $(VALIDATE_SCRIPT) $(TRAIN_JSONL) $(VAL_JSONL)
-	$(PY) $(VALIDATE_SCRIPT) --fix $(TRAIN_JSONL) $(VAL_JSONL)
+parse-base: ensure-out ## Parse BASE raw -> $(BASE_PARSED)
+	$(PY) parse.py \
+	  --raw $(BASE_RAW) \
+	  --out $(BASE_PARSED) \
+	  --print-bad $(PRINT_BAD)
 
-# 4) Upload + launch SFT (LoRA). Prints TRAIN_ID/VAL_ID and FT job ID; optionally tails logs.
-sft: keys validate $(SFT_SCRIPT)
-	$(PY) $(SFT_SCRIPT) \
-	  --train $(TRAIN_JSONL) \
-	  --val   $(VAL_JSONL) \
-	  --model $(MODEL) \
-	  --n-epochs $(N_EPOCHS) \
-	  --batch-size $(BATCH_SIZE) \
-	  --learning-rate $(LR) \
-	  --n-evals $(N_EVALS) \
-	  --suffix $(SUFFIX) \
-	  $(if $(filter 1,$(WATCH)),--watch,) 
-
-# 5) Evaluate base & FT models on VAL (continuous stance metrics + OVR PRF)
-eval: $(EVAL_SCRIPT) $(VAL_JSONL)
-	@test -n "$(BASE_MODEL)" || (echo "ERROR: set BASE_MODEL" && exit 2)
-	@if [ -z "$(FT_MODEL)" ]; then \
-	  echo "NOTE: FT_MODEL empty → will evaluate BASE only."; \
-	fi
-	$(PY) $(EVAL_SCRIPT) \
-	  --val-file $(VAL_JSONL) \
-	  --base-model "$(BASE_MODEL)" \
-	  $(if $(FT_MODEL),--ft-model "$(FT_MODEL)",) \
-	  --concurrency $(CONCURRENCY) \
-	  --max-tokens $(MAX_TOKENS) \
-	  --temperature $(TEMP) \
+score-base: ensure-out ## Score BASE parsed -> $(BASE_CSV)
+	$(PY) score.py \
+	  --val-file $(VAL) \
+	  --pred-file $(BASE_PARSED) \
 	  --stance-thresh $(STANCE_THRESH) \
 	  --eps $(EPS) \
-	  --dump-csv $(DATA_DIR)/preds.csv
+	  --dump-csv $(BASE_CSV)
 
-clean:
-	@rm -f $(PREDS_BASE_CSV) $(PREDS_FT_CSV) $(DATA_DIR)/preds_base.csv $(DATA_DIR)/preds_ft.csv
-	@echo "Cleaned prediction CSVs."
+full-base: infer-base parse-base score-base ## Run full BASE pipeline
+
+warm-base: verify-key ensure-out ## Send a couple warm-up requests to BASE model
+	$(PY) infer.py \
+	  --val-file $(VAL) \
+	  --model $(BASE) \
+	  --out $(BASE_RAW) \
+	  $(INFER_FLAGS) \
+	  --limit 2
+
+# -------- Inference (fine-tuned) ----------------------------------------
+.PHONY: infer-ft parse-ft score-ft full-ft warm-ft guard-ft
+
+guard-ft:
+	@test -n "$(FT)" || (echo "ERROR: set FT=<fine-tuned-model-id> (e.g., org/name-ft-123)" && exit 1)
+
+infer-ft: guard-ft verify-key ensure-out ## Run inference on FT model -> $(FT_RAW)
+	$(PY) infer.py \
+	  --val-file $(VAL) \
+	  --model $(FT) \
+	  --out $(FT_RAW) \
+	  $(INFER_FLAGS) \
+	  --limit $(LIMIT)
+
+parse-ft: guard-ft ensure-out ## Parse FT raw -> $(FT_PARSED)
+	$(PY) parse.py \
+	  --raw $(FT_RAW) \
+	  --out $(FT_PARSED) \
+	  --print-bad $(PRINT_BAD)
+
+score-ft: guard-ft ensure-out ## Score FT parsed -> $(FT_CSV)
+	$(PY) score.py \
+	  --val-file $(VAL) \
+	  --pred-file $(FT_PARSED) \
+	  --stance-thresh $(STANCE_THRESH) \
+	  --eps $(EPS) \
+	  --dump-csv $(FT_CSV)
+
+full-ft: infer-ft parse-ft score-ft ## Run full FT pipeline
+
+warm-ft: guard-ft verify-key ensure-out ## Send a couple warm-up requests to FT model
+	$(PY) infer.py \
+	  --val-file $(VAL) \
+	  --model $(FT) \
+	  --out $(FT_RAW) \
+	  $(INFER_FLAGS) \
+	  --limit 2
+
+# -------- Convenience combos -------------------------------------------
+.PHONY: full-both quick10
+
+full-both: full-base full-ft ## Run base and FT pipelines end-to-end
+
+quick10: ## Quick smoke test with LIMIT=10 and smaller max tokens
+	$(MAKE) full-base LIMIT=10 MAX_TOKENS=128 PRINT_BAD=5

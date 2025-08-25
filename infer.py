@@ -17,6 +17,25 @@ python infer.py \
   --retry-on-trunc --growth 2.0 --max-tokens-cap 512 \
   --append-enforcer --transport http
 
+python infer.py \
+  --val-file data/val_BAL.jsonl \
+  --model solomonmessing_ddea/Meta-Llama-3.1-70B-Instruct-Reference-tiktok-sft-v2-f22f8689 \
+  --out out/preds_ft.raw.jsonl \
+  --concurrency 4 --temperature 0 --max-tokens 512 \
+  --retries 5 --base-sleep 1.0 --warmup 2 \
+  --retry-on-trunc --growth 2.0 --max-tokens-cap 512 \
+  --append-enforcer --transport http
+
+python infer.py \
+  --val-file data/val_BAL.jsonl \
+  --model meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo \
+  --out out/preds_llama3.1-70B.raw.jsonl \
+  --concurrency 4 --temperature 0 --max-tokens 512 \
+  --retries 5 --base-sleep 1.0 --warmup 2 \
+  --retry-on-trunc --growth 2.0 --max-tokens-cap 512 \
+  --append-enforcer --transport http
+
+
 """
 
 #!/usr/bin/env python3
