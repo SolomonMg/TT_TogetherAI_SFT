@@ -1,8 +1,8 @@
 """
 python infer.py \
-  --val-file data/val_BAL.jsonl \
+  --val-file data/val_BAL_new.jsonl \
   --model openai/gpt-oss-120b \
-  --out out/preds_base.raw.jsonl \
+  --out out/preds_gpt-oss_new.raw.jsonl \
   --concurrency 4 --temperature 0 --max-tokens 512 \
   --retries 5 --base-sleep 1.0 --warmup 2 \
   --retry-on-trunc --growth 2.0 --max-tokens-cap 512 \
@@ -53,14 +53,7 @@ FORMAT_ENFORCER_TXT = (
     "No extra text."
 )
 
-def load_jsonl(path: str) -> List[dict]:
-    out = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                out.append(json.loads(line))
-    return out
+from json_utils import load_jsonl
 
 def prompt_messages(example: dict, append_enforcer: bool) -> List[Dict[str, str]]:
     # Hide gold (last assistant) and keep original user/system roles

@@ -4,6 +4,7 @@
 *.swo
 .vscode/
 .idea/
+CLAUDE.md
 
 # Python
 __pycache__/

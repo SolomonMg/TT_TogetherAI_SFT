@@ -42,24 +42,10 @@ import argparse
 from typing import List, Dict, Any
 
 import pandas as pd
-
-REQ_KEYS = {"china_stance_score","china_sensitive","collective_action","languages"}
-ALLOWED_YES_NO_CD = {"yes", "no", "cannot_determine"}
+from json_utils import REQ_KEYS, ALLOWED_YES_NO_CD, load_jsonl, gold_of, user_text
 
 # ----------------- I/O helpers -----------------
-
-def load_jsonl(path: str) -> List[dict]:
-    rows = []
-    with open(path, "r", encoding="utf-8") as f:
-        for ln, line in enumerate(f, 1):
-            line = re.sub(r'[\u2028\u2029]', '', line).rstrip("\r\n")
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except Exception as e:
-                raise RuntimeError(f"{path}: line {ln} invalid JSON: {e}")
-    return rows
+# load_jsonl, gold_of, user_text now imported from json_utils
 
 def load_val_examples(val_path: str) -> List[dict]:
     data = load_jsonl(val_path)

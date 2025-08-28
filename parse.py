@@ -17,6 +17,11 @@ python parse.py \
   --print-bad 5
 
 python parse.py \
+  --raw out/preds_gpt-oss_new.raw.jsonl \
+  --out out/preds_gpt-oss_new.parsed.jsonl \
+  --print-bad 5
+
+python parse.py \
   --raw out/preds_ft.raw.jsonl \
   --out out/preds_ft.parsed.jsonl \
   --print-bad 5
@@ -33,21 +38,9 @@ python parse.py \
   """
 
 import os, sys, json, re, argparse
-
-ALLOWED_YES_NO_CD = {"yes","no","cannot_determine"}
-ALLOWED_LANGS     = ["english","mandarin","spanish","other","no_language"]
-REQ_KEYS          = {"china_stance_score","china_sensitive","collective_action","languages"}
+from json_utils import ALLOWED_YES_NO_CD, ALLOWED_LANGS, REQ_KEYS, load_jsonl
 
 # --- helpers -------------------------------------------------------------
-
-def load_jsonl(path: str):
-    out = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.rstrip("\r\n")
-            if line:
-                out.append(json.loads(line))
-    return out
 
 def ok_langs(x):
     return (isinstance(x, list) and len(x) > 0

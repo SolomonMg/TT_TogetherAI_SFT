@@ -1,195 +1,271 @@
 #!/usr/bin/env python3
 """
-score.py — Compact scorer for multiple model prediction files (parsed outputs).
+score.py — Summarize model performance vs. human coders.
 
-- Reads the gold labels from a validation JSONL where the final assistant
-  message contains the gold JSON.
-- Reads any number of parsed prediction files produced by parse.py
-  (each line: {"idx": <int>, "parsed": true/false, "json": {...}})
+- Accepts multiple parsed prediction files (from parse.py).
+- Displays one row per model (row label = predictions file basename).
+- Columns shown:
+    stance_R2,
+    ch_sensitive_F (or ch_sensitive_R2 if --yn-metric r2),
+    col_action_F   (or col_action_R2 if --yn-metric r2)
 
-DISPLAY (as requested):
-- Rows = basename of each predictions file
-- Columns = stance_R2, ch_sensitive_F, col_action_F
+Legacy behavior preserved:
+- Stance OVR threshold remains (--stance-thresh), but display keeps stance_R2.
 
-LEGACY COMPAT:
-- Accepts --stance-thresh and --eps but only uses them for legacy
-  computations under the hood (not shown). Missing predictions are
-  treated as negative for classification F1, as before.
+R² for dichotomous vars:
+- If numeric scores exist in predictions (china_sensitive_score/prob/...),
+  use them; else map labels via --cd-map (default yes=1,no=0,cd=0.5).
 
-Usage:
-  python score.py --val-file data/val_BAL.jsonl out/preds_base.parsed.jsonl
-  python score.py --val-file data/val_BAL.jsonl \
-      out/preds_base.parsed.jsonl out/preds_ft.parsed.jsonl \
-      --dump-csv out/summary.csv --stance-thresh 0.3 --eps 1e-6
-
-python score.py --val-file data/val_BAL.jsonl \
-  out/preds_llama3.1-70B.parsed.jsonl \
-  out/preds_llama3.1-70B-SFT.parsed.jsonl \
-  out/preds_llama3.3-70B.parsed.jsonl \
-  out/preds_gpt-oss-120b.parsed.jsonl
-
+Usage examples:
+  python score.py --val-file data/val_BAL.jsonl --yn-metric f1 out/preds_a.parsed.jsonl out/preds_b.parsed.jsonl
+  python score.py --val-file data/val_BAL_new.jsonl --yn-metric r2 out/preds_gpt-oss_new.parsed.jsonl
 """
 
 import os
-import sys
+import re
 import json
 import argparse
-import re
-from typing import List, Dict, Tuple
+from typing import List, Dict, Any
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score, precision_recall_fscore_support
+from json_utils import REQ_KEYS, ALLOWED_YES_NO_CD, load_jsonl, gold_of, clamp01, clamp11, yesno_to_label
 
-REQ_KEYS = {"china_stance_score","china_sensitive","collective_action","languages"}
+# ---------------- I/O ----------------
 
-# ---------- I/O ----------
-
-def load_jsonl(path: str) -> List[dict]:
-    rows = []
-    with open(path, "r", encoding="utf-8") as f:
-        for ln, line in enumerate(f, 1):
-            line = re.sub(r'[\u2028\u2029]', '', line).rstrip("\r\n")
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except Exception as e:
-                raise RuntimeError(f"{path}: line {ln} not valid JSON: {e}")
-    return rows
-
-def load_val_gold(val_path: str) -> List[dict]:
+def load_val_examples(val_path: str) -> List[dict]:
     data = load_jsonl(val_path)
-    gold = []
     for i, ex in enumerate(data):
-        try:
-            g = json.loads(ex["messages"][-1]["content"])
-            if set(g.keys()) != REQ_KEYS:
-                raise ValueError(f"gold keys {set(g.keys())} != {REQ_KEYS}")
-            gold.append(g)
-        except Exception as e:
-            raise RuntimeError(f"{val_path}: example {i} missing/invalid gold: {e}")
-    return gold
+        g = gold_of(ex)
+        if set(g.keys()) != REQ_KEYS:
+            raise RuntimeError(f"{val_path}: example {i} gold keys {set(g.keys())} != {REQ_KEYS}")
+    return data
+
+# gold_of now imported from json_utils
 
 def load_parsed_preds(pred_path: str) -> Dict[int, dict]:
     """
-    Expects parse.py lines like: {"idx": 0, "parsed": true, "json": {...}}
-    Returns idx -> prediction dict for parsed==True rows.
+    parse.py outputs rows like:
+      {"idx": 0, "parsed": true, "json": {...}}
+    Return: idx -> prediction dict (only for parsed==True)
     """
-    preds = {}
+    out = {}
     for row in load_jsonl(pred_path):
-        if not isinstance(row, dict):
-            continue
-        idx = row.get("idx", None)
-        if idx is None or not row.get("parsed", False):
-            continue
-        pj = row.get("json")
-        if isinstance(pj, dict):
-            preds[int(idx)] = pj
-    return preds
+        if isinstance(row, dict) and row.get("parsed") and "idx" in row and isinstance(row.get("json"), dict):
+            out[int(row["idx"])] = row["json"]
+    return out
 
-# ---------- Metrics ----------
+def model_name_from_path(path: str) -> str:
+    base = os.path.basename(path)
+    base = re.sub(r"\.jsonl$", "", base)
+    base = re.sub(r"\.parsed$", "", base)
+    base = re.sub(r"[^\w\.-]+", "_", base).strip("_")
+    return base or "model"
 
-def to_float(x):
+# ---------------- Normalizers / helpers ----------------
+
+# clamp01, clamp11, yesno_to_label now imported from json_utils
+
+def parse_cd_map(s: str) -> Dict[str, float]:
+    # format: "yes=1,no=0,cannot_determine=0.5"
+    default = {"yes":1.0, "no":0.0, "cannot_determine":0.5}
+    if not s:
+        return default
+    out = {}
     try:
-        v = float(x)
-        # clamp to [-1, 1] as in legacy behavior
-        return max(-1.0, min(1.0, v))
+        parts = [p.strip() for p in s.split(",")]
+        for p in parts:
+            k, v = [t.strip() for t in p.split("=")]
+            if k in ALLOWED_YES_NO_CD:
+                out[k] = float(v)
     except Exception:
-        return None
+        return default
+    for k, v in default.items():
+        out.setdefault(k, v)
+    return out
 
-def stance_r2(gold: List[dict], preds: Dict[int, dict]) -> float:
-    g, p = [], []
-    for i in range(len(gold)):
-        gs = to_float(gold[i]["china_stance_score"])
-        ps = to_float(preds.get(i, {}).get("china_stance_score")) if i in preds else None
-        if (gs is not None) and (ps is not None):
-            g.append(gs); p.append(ps)
-    if len(g) < 2:
-        return float("nan")
-    return r2_score(np.array(g), np.array(p))
+def derive_label(pred: dict, score_key: str, label_key: str, yn_thresh: float | None) -> str:
+    """For F1 path (label), optionally threshold numeric score if provided."""
+    if yn_thresh is not None and score_key in pred:
+        v = clamp01(pred.get(score_key))
+        if v is None:
+            return yesno_to_label(pred.get(label_key))
+        return "yes" if v >= yn_thresh else "no"
+    return yesno_to_label(pred.get(label_key))
 
-def f1_yes(gold: List[dict], preds: Dict[int, dict], field: str) -> float:
+def numeric_from_pred_or_label(pred: dict, prefix: str, cd_map: Dict[str,float]) -> float:
     """
-    Binary F1 with 'yes' as positive.
-    Missing or unparsed preds -> treated as 'no' (legacy).
+    Try to pull a numeric probability/score for a dichotomous var.
+    Known candidates: <prefix>_{score,prob,yes_prob,p}.
+    Fallback: map the categorical label via cd_map.
     """
-    y_true, y_pred = [], []
-    n = len(gold)
-    for i in range(n):
-        y_true.append(1 if gold[i][field] == "yes" else 0)
-        pv = preds.get(i, {})
-        y_pred.append(1 if pv.get(field) == "yes" else 0)
+    candidates = [
+        f"{prefix}_score",
+        f"{prefix}_prob",
+        f"{prefix}_yes_prob",
+        f"{prefix}_p",
+    ]
+    for k in candidates:
+        if k in pred:
+            v = clamp01(pred[k])
+            if v is not None:
+                return v
+    lab = yesno_to_label(pred.get(prefix))
+    return cd_map.get(lab, np.nan)
+
+# ---------------- Metrics ----------------
+
+def stance_r2(golds: List[float], preds: List[float]) -> float:
+    g = np.array([clamp11(x) for x in golds], dtype=float)
+    p = np.array([clamp11(x) for x in preds], dtype=float)
+    mask = ~np.isnan(g) & ~np.isnan(p)
+    if mask.sum() < 2:
+        return np.nan
+    return float(r2_score(g[mask], p[mask]))
+
+def f1_yes(gold_labels: List[str], pred_labels: List[str]) -> float:
+    def to01(x): return 1 if x == "yes" else 0
+    y_true = np.array([to01(x) for x in gold_labels], dtype=int)
+    y_pred = np.array([to01(x) for x in pred_labels], dtype=int)
+    if y_true.size == 0:
+        return np.nan
     _, _, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average='binary', pos_label=1, zero_division=0
     )
     return float(f1)
 
-# (Optional) legacy stance OVR metrics using a threshold — computed but not displayed
-def _stance_ovr_legacy(gold: List[dict], preds: Dict[int, dict], thresh: float) -> Tuple[float, float]:
-    # returns (F1_pos, F1_neg) — not displayed, just to keep old behavior available
-    def y_arrays(sign: str):
-        yt, yp = [], []
-        for i in range(len(gold)):
-            g = gold[i]["china_stance_score"]
-            is_pos = (g >  thresh)
-            is_neg = (g < -thresh)
-            yt.append(1 if (is_pos if sign == "pos" else is_neg) else 0)
-            ps = preds.get(i, {}).get("china_stance_score")
-            if ps is None:
-                yp.append(0)
-            else:
-                ps = float(ps)
-                pred_pos = (ps >  thresh)
-                pred_neg = (ps < -thresh)
-                yp.append(1 if (pred_pos if sign == "pos" else pred_neg) else 0)
-        _, _, f, _ = precision_recall_fscore_support(
-            yt, yp, average='binary', pos_label=1, zero_division=0
-        )
-        return float(f)
-    return y_arrays("pos"), y_arrays("neg")
+def r2_on_arrays(g_nums, p_nums):
+    g = np.array(g_nums, dtype=float)
+    p = np.array(p_nums, dtype=float)
+    mask = ~np.isnan(g) & ~np.isnan(p)
+    if mask.sum() < 2:
+        return np.nan
+    return float(r2_score(g[mask], p[mask]))
 
-# ---------- Main ----------
+# ---------------- Core scoring ----------------
 
-def main(val_file: str,
-         preds: List[str],
-         dump_csv: str = None,
-         stance_thresh: float = 0.3,   # kept for legacy; not displayed
-         eps: float = 1e-6,            # kept for legacy; not displayed
-         **_):                          # accept/ignore any extra legacy flags
-    gold = load_val_gold(val_file)
+def score_models(
+    val_file: str,
+    pred_paths: List[str],
+    stance_thresh: float,
+    yn_thresh: float | None,
+    yn_metric: str,
+    cd_map_str: str,
+) -> pd.DataFrame:
+    val = load_val_examples(val_file)
+    n = len(val)
 
-    records = []
-    for pred_path in preds:
-        pred_map = load_parsed_preds(pred_path)
+    # Prepare per-model predictions
+    models: List[str] = []
+    preds_by_model: List[Dict[int, dict]] = []
+    name_counts = {}
+    for p in pred_paths:
+        name = model_name_from_path(p)
+        if name in name_counts:
+            name_counts[name] += 1
+            name = f"{name}_{name_counts[name]}"
+        else:
+            name_counts[name] = 1
+        models.append(name)
+        preds_by_model.append(load_parsed_preds(p))
 
-        row = {
-            "model": os.path.basename(pred_path),
-            "stance_R2": stance_r2(gold, pred_map),
-            "ch_sensitive_F": f1_yes(gold, pred_map, "china_sensitive"),
-            "col_action_F":  f1_yes(gold, pred_map, "collective_action"),
-        }
+    cd_map = parse_cd_map(cd_map_str)
+    rows = []
 
-        # compute legacy stance OVR metrics so behavior remains available (not printed)
-        _ = _stance_ovr_legacy(gold, pred_map, stance_thresh)  # noqa: F841
+    # Gold fields
+    gold_stance = [clamp11(gold_of(ex)["china_stance_score"]) for ex in val]
+    gold_sensitive = [yesno_to_label(gold_of(ex)["china_sensitive"]) for ex in val]
+    gold_collective = [yesno_to_label(gold_of(ex)["collective_action"]) for ex in val]
 
-        records.append(row)
+    # Quick prevalence hint (if all one class, sklearn returns R²=0)
+    uniq_sens = sorted(set(gold_sensitive))
+    uniq_coll = sorted(set(gold_collective))
+    if len(set(gold_sensitive)) == 1:
+        print(f"[note] gold china_sensitive constant: {uniq_sens[0]}")
+    if len(set(gold_collective)) == 1:
+        print(f"[note] gold collective_action constant: {uniq_coll[0]}")
 
-    df = pd.DataFrame.from_records(records).set_index("model")
-    # nice printing
-    print(df.to_string(float_format=lambda x: f"{x:.3f}"))
+    for mname, mmap in zip(models, preds_by_model):
+        # stance scores
+        pred_stance = [clamp11(mmap.get(i, {}).get("china_stance_score")) for i in range(n)]
+        stance_r2_val = stance_r2(gold_stance, pred_stance)
 
-    if dump_csv:
-        os.makedirs(os.path.dirname(dump_csv), exist_ok=True)
-        df.to_csv(dump_csv, index=True)
+        # dich vars
+        if yn_metric == "f1":
+            pred_sensitive_labels = [
+                derive_label(mmap.get(i, {}), "china_sensitive_score", "china_sensitive", yn_thresh)
+                for i in range(n)
+            ]
+            pred_collective_labels = [
+                derive_label(mmap.get(i, {}), "collective_action_score", "collective_action", yn_thresh)
+                for i in range(n)
+            ]
+            row = {
+                "model": mname,
+                "stance_R2": stance_r2_val,
+                "ch_sensitive_F": f1_yes(gold_sensitive, pred_sensitive_labels),
+                "col_action_F":  f1_yes(gold_collective, pred_collective_labels),
+            }
+        else:  # yn_metric == "r2"
+            gold_sensitive_num = [cd_map.get(x, np.nan) for x in gold_sensitive]
+            gold_collective_num = [cd_map.get(x, np.nan) for x in gold_collective]
+            pred_sensitive_num = [
+                numeric_from_pred_or_label(mmap.get(i, {}), "china_sensitive", cd_map)
+                for i in range(n)
+            ]
+            pred_collective_num = [
+                numeric_from_pred_or_label(mmap.get(i, {}), "collective_action", cd_map)
+                for i in range(n)
+            ]
+            row = {
+                "model": mname,
+                "stance_R2": stance_r2_val,
+                "ch_sensitive_R2": r2_on_arrays(gold_sensitive_num, pred_sensitive_num),
+                "col_action_R2":  r2_on_arrays(gold_collective_num, pred_collective_num),
+            }
+        rows.append(row)
 
-if __name__ == "__main__":
+    df = pd.DataFrame(rows).set_index("model")
+    return df
+
+# ---------------- CLI ----------------
+
+def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--val-file", required=True, help="Validation JSONL with gold in final assistant message.")
-    ap.add_argument("--dump-csv", help="Optional path to write the compact summary CSV.")
-    # legacy flags (accepted for compat, not shown in display)
-    ap.add_argument("--stance-thresh", type=float, default=0.3)
-    ap.add_argument("--eps", type=float, default=1e-6)
+    ap.add_argument("--val-file", required=True, help="Validation JSONL (gold labels in last assistant message).")
+    ap.add_argument("--stance-thresh", type=float, default=0.3,
+                    help="(Legacy) threshold used elsewhere for stance OVR; kept for compatibility.")
+    ap.add_argument("--yn-thresh", type=float, default=None,
+                    help="If provided, threshold numeric *_score fields (>=thresh => yes) for dichotomous vars (F1 path).")
+    ap.add_argument("--yn-metric", choices=["f1","r2"], default="f1",
+                    help="Metric for dichotomous vars (china_sensitive, collective_action). Default: f1.")
+    ap.add_argument("--cd-map", default="yes=1,no=0,cannot_determine=0.5",
+                    help="Mapping used when --yn-metric r2. Format: 'yes=1,no=0,cannot_determine=0.5'")
+    ap.add_argument("--out", help="Optional path to write the summary table CSV.")
     ap.add_argument("preds", nargs="+", help="One or more parsed prediction files (from parse.py).")
     args = ap.parse_args()
-    main(**vars(args))
+
+    df = score_models(
+        val_file=args.val_file,
+        pred_paths=args.preds,
+        stance_thresh=args.stance_thresh,
+        yn_thresh=args.yn_thresh,
+        yn_metric=args.yn_metric,
+        cd_map_str=args.cd_map,
+    )
+
+    if args.yn_metric == "f1":
+        cols = ["stance_R2","ch_sensitive_F","col_action_F"]
+    else:
+        cols = ["stance_R2","ch_sensitive_R2","col_action_R2"]
+
+    print(df[cols].to_string(float_format=lambda x: f"{x:.3f}"))
+
+    if args.out:
+        os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+        df[cols].to_csv(args.out)
+        print(f"\nWrote summary CSV: {args.out}")
+
+if __name__ == "__main__":
+    main()

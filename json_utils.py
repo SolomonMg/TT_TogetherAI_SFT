@@ -1,20 +1,47 @@
 # json_utils.py
-import json, re
+import json, re, os
+import pandas as pd
+from typing import Optional, List
 
 ALLOWED_YES_NO_CD = {"yes", "no", "cannot_determine"}
 ALLOWED_LANGS = ["english", "mandarin", "spanish", "other", "no_language"]
 REQ_KEYS = {"china_stance_score", "china_sensitive", "collective_action", "languages"}
 
 # ---------- file I/O ----------
-def load_jsonl(path):
+def load_jsonl(path: str) -> List[dict]:
+    """Load JSONL file with consistent error handling and line processing."""
     out = []
     with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.rstrip("\r\n")
+        for ln, line in enumerate(f, 1):
+            line = re.sub(r'[\u2028\u2029]', '', line).rstrip("\r\n")
             if not line:
                 continue
-            out.append(json.loads(line))
+            try:
+                out.append(json.loads(line))
+            except Exception as e:
+                raise RuntimeError(f"{path}: line {ln} invalid JSON: {e}")
     return out
+
+def write_jsonl(path: str, rows: list) -> None:
+    """Write JSONL file with consistent formatting."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"[write] {path}  n={len(rows)}")
+
+def load_table(path: str) -> pd.DataFrame:
+    """Load CSV or Parquet file."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".parquet":
+        return pd.read_parquet(path)
+    return pd.read_csv(path)
+
+def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize column names to lowercase."""
+    df = df.copy()
+    df.columns = [c.strip().lower() for c in df.columns]
+    return df
 
 def gold_of(example: dict) -> dict:
     # Ground truth is the last assistant message's content (JSON string)
@@ -29,6 +56,53 @@ def prompt_messages(example: dict) -> list[dict]:
 def user_text(example: dict) -> str:
     parts = [m.get("content", "") for m in example["messages"] if m.get("role") == "user"]
     return "\n\n".join(parts).strip()
+
+# ---------- data processing ----------
+def clamp01(x) -> Optional[float]:
+    """Clamp value to [0, 1] range with percentage handling."""
+    try:
+        v = float(x)
+        if v > 1.0 and v <= 100.0:  # allow percentages
+            v = v / 100.0
+        return max(0.0, min(1.0, v))
+    except Exception:
+        return None
+
+def clamp11(x) -> Optional[float]:
+    """Clamp value to [-1, 1] range."""
+    try:
+        v = float(x)
+        return max(-1.0, min(1.0, v))
+    except Exception:
+        return None
+
+def safe_text(x) -> str:
+    """Coerce any value (including NaN/float) to a clean text string."""
+    if x is None:
+        return ""
+    try:
+        if pd.isna(x):
+            return ""
+    except Exception:
+        pass
+    return str(x).strip()
+
+def to_str_meta(x) -> str:
+    """Convert meta_id to string, handling floats like 123.0 -> 123."""
+    if pd.isna(x):
+        return ""
+    s = str(x).strip()
+    if re.fullmatch(r"\d+\.0", s):
+        s = s[:-2]
+    return s
+
+def yesno_to_label(x) -> str:
+    """Convert various inputs to yes/no/cannot_determine labels."""
+    if isinstance(x, str):
+        s = x.strip().lower()
+        if s in ALLOWED_YES_NO_CD:
+            return s
+    return ""
 
 # ---------- schema ----------
 def ok_langs(x):
