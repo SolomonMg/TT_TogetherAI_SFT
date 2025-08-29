@@ -128,18 +128,24 @@ def get_text_http(rjson: dict) -> Tuple[str, Optional[str]]:
         return "", None
 
 async def call_sdk(client: Together, model: str, messages: List[Dict[str,str]],
-                   max_tokens: int, temperature: float, timeout_s: float) -> Tuple[str, Optional[str]]:
+                   max_tokens: int, temperature: float, timeout_s: float, effort: str) -> Tuple[str, Optional[str]]:
     loop = asyncio.get_running_loop()
     def _do():
-        resp = client.chat.completions.create(
-            model=model, messages=messages, temperature=temperature,
-            max_tokens=max_tokens, stream=False
-        )
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False
+        }
+        if effort:
+            kwargs["reasoning"] = {"effort": effort}
+        resp = client.chat.completions.create(**kwargs)
         return get_text_sdk(resp), get_finish_reason_sdk(resp)
     return await asyncio.wait_for(loop.run_in_executor(None, _do), timeout=timeout_s)
 
 async def call_http(model: str, messages: List[Dict[str,str]],
-                    max_tokens: int, temperature: float, timeout_s: float) -> Tuple[str, Optional[str]]:
+                    max_tokens: int, temperature: float, timeout_s: float, effort: str) -> Tuple[str, Optional[str]]:
     loop = asyncio.get_running_loop()
     headers = {
         "Authorization": f"Bearer {os.environ['TOGETHER_API_KEY']}",
@@ -152,6 +158,8 @@ async def call_http(model: str, messages: List[Dict[str,str]],
         "max_tokens": max_tokens,
         "stream": False,
     }
+    if effort:
+        payload["reasoning"] = {"effort": effort}
     def _do():
         r = requests.post(TOGETHER_CHAT_URL, headers=headers, json=payload, timeout=(10, timeout_s))
         if r.status_code == 401:
@@ -176,7 +184,8 @@ async def one_example(idx: int,
                       retry_on_trunc: bool,
                       growth: float,
                       max_tokens_cap: int,
-                      append_enforcer: bool) -> dict:
+                      append_enforcer: bool,
+                      effort: str) -> dict:
     msgs = prompt_messages(ex, append_enforcer=append_enforcer)
     cur_tokens = max_tokens
     attempt = 0
@@ -185,9 +194,9 @@ async def one_example(idx: int,
         t0 = time.time()
         try:
             if transport == "sdk":
-                text, fr = await call_sdk(client, model, msgs, cur_tokens, temperature, timeout_s)
+                text, fr = await call_sdk(client, model, msgs, cur_tokens, temperature, timeout_s, effort)
             else:
-                text, fr = await call_http(model, msgs, cur_tokens, temperature, timeout_s)
+                text, fr = await call_http(model, msgs, cur_tokens, temperature, timeout_s, effort)
             latency = time.time() - t0
             truncated = looks_truncated(text, fr) if retry_on_trunc else False
             if truncated and attempt <= retries:
@@ -241,7 +250,8 @@ async def main(val_file: str,
                retry_on_trunc: bool,
                growth: float,
                max_tokens_cap: int,
-               append_enforcer: bool):
+               append_enforcer: bool,
+               effort: str):
     if not os.environ.get("TOGETHER_API_KEY"):
         raise SystemExit("Please export TOGETHER_API_KEY")
     data = load_jsonl(val_file)
@@ -256,9 +266,9 @@ async def main(val_file: str,
         try:
             msgs = [{"role":"system","content":"Return: {\"china_stance_score\":0,\"china_sensitive\":\"no\",\"collective_action\":\"no\",\"languages\":[\"english\"]}"}]
             if transport == "sdk":
-                await call_sdk(client, model, msgs, 16, 0.0, timeout_s=10)
+                await call_sdk(client, model, msgs, 16, 0.0, timeout_s=10, effort=effort)
             else:
-                await call_http(model, msgs, 16, 0.0, timeout_s=10)
+                await call_http(model, msgs, 16, 0.0, timeout_s=10, effort=effort)
         except Exception:
             pass
 
@@ -271,7 +281,7 @@ async def main(val_file: str,
                 temperature=temperature, max_tokens=max_tokens, retries=retries,
                 base_sleep=base_sleep, timeout_s=timeout_s,
                 retry_on_trunc=retry_on_trunc, growth=growth, max_tokens_cap=max_tokens_cap,
-                append_enforcer=append_enforcer)
+                append_enforcer=append_enforcer, effort=effort)
 
     t0 = time.time()
     results = await asyncio.gather(*[runner(i, ex) for i, ex in enumerate(data)])
@@ -303,6 +313,8 @@ if __name__ == "__main__":
     ap.add_argument("--growth", type=float, default=1.8, help="Growth factor for max_tokens on truncation")
     ap.add_argument("--append-enforcer", action="store_true",
                     help="Append a JSON-only system nudge to each prompt")
+    ap.add_argument("--effort", default="low", choices=["low", "medium", "high"],
+                    help="reasoning effort sent to the API (models may ignore)")
 
     args = ap.parse_args()
     asyncio.run(main(
@@ -312,4 +324,4 @@ if __name__ == "__main__":
         limit=args.limit, transport=args.transport, timeout_s=args.per_call_timeout,
         warmup=args.warmup, retry_on_trunc=args.retry_on_trunc,
         growth=args.growth, max_tokens_cap=args.max_tokens_cap,
-        append_enforcer=args.append_enforcer))
+        append_enforcer=args.append_enforcer, effort=args.effort))

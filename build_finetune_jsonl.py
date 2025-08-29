@@ -74,7 +74,7 @@ SYSTEM_PROMPT_FLOAT = (
     "Use the full range; 0 = neutral/unclear.\n\n"
     "collective_action - Does this video encourage or portray collective action? A float in [0,1], where 0 is 'no' and 1 is 'yes'.\n\n"
     "Base scores on explicit evidence."
-    "Return ONLY a minified JSON object with exactly those four keys and nothing else."
+    "Return ONLY a minified JSON object with exactly those keys and nothing else."
 )
 
 SYSTEM_PROMPT_LABEL = (
@@ -92,9 +92,7 @@ SYSTEM_PROMPT_LABEL = (
     "- china_stance_score: float from -1 (very negative about China) to +1 (very positive)\n"
     "- china_sensitive: one of {'yes','no','cannot_determine'}\n"
     "- collective_action: one of {'yes','no','cannot_determine'}\n"
-    "- languages: non-empty list from {'english','mandarin','spanish','other','no_language'}; "
-    "  if 'no_language' is present, it must be the only item.\n\n"
-    "Return ONLY a minified JSON object with exactly those four keys and nothing else."
+    "Return ONLY a minified JSON object with exactly those keys and nothing else."
 )
 
 # Utility functions now imported from json_utils
@@ -288,7 +286,8 @@ def process_single_labeled_file(file_path: str, train_frac: float, lang_thresh: 
         "transcript": "transcript"
     }
     
-    required_base = ["china_stance_score", "sensitive", "collective_action", "languages"]
+    required_base = ["china_stance_score", "sensitive"]
+    optional_cols = ["collective_action", "languages"]
     text_cols = ["transcript", "description"] 
     
     # Find text columns
@@ -305,6 +304,15 @@ def process_single_labeled_file(file_path: str, train_frac: float, lang_thresh: 
     missing = [c for c in required_base if c not in df.columns]
     if missing:
         raise SystemExit(f"[error] single labeled file missing columns: {missing}")
+    
+    # Add missing optional columns with defaults
+    if "collective_action" not in df.columns:
+        df["collective_action"] = 0.0  # Default to "no"
+        print(f"[info] Added missing 'collective_action' column with default value 0.0")
+    
+    if "languages" not in df.columns:
+        df["languages"] = "['english']"  # Default to English
+        print(f"[info] Added missing 'languages' column with default value ['english']")
     
     df["meta_id"] = df[meta_col].map(to_str_meta)
     

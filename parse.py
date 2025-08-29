@@ -47,17 +47,38 @@ def ok_langs(x):
             and all(isinstance(s, str) and s in ALLOWED_LANGS for s in x)
             and (("no_language" not in x) or (len(x) == 1)))
 
+def valid_yn_field(x) -> bool:
+    """Accept either string labels or numeric [0,1] values"""
+    if x in ALLOWED_YES_NO_CD:
+        return True
+    try:
+        f = float(x)
+        return 0.0 <= f <= 1.0
+    except:
+        return False
+
 def valid_schema(y: dict) -> bool:
     if not isinstance(y, dict): return False
-    if set(y.keys()) != REQ_KEYS: return False
+    
+    # Required keys: china_stance_score, china_sensitive
+    required_keys = {"china_stance_score", "china_sensitive"}
+    if not required_keys.issubset(y.keys()): return False
+    
     try:
         s = float(y.get("china_stance_score"))
     except Exception:
         return False
     if not (-1.0 <= s <= 1.0): return False
-    if y.get("china_sensitive") not in ALLOWED_YES_NO_CD: return False
-    if y.get("collective_action") not in ALLOWED_YES_NO_CD: return False
-    if not ok_langs(y.get("languages")): return False
+    if not valid_yn_field(y.get("china_sensitive")): return False
+    
+    # Optional: collective_action (if present, must be valid)
+    if "collective_action" in y:
+        if not valid_yn_field(y.get("collective_action")): return False
+    
+    # Optional: languages (if present, must be valid)
+    if "languages" in y:
+        if not ok_langs(y.get("languages")): return False
+    
     return True
 
 # strip code fences if present
