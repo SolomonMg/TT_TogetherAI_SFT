@@ -31,7 +31,7 @@ from typing import List, Dict, Any
 import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score, precision_recall_fscore_support
-from json_utils import REQ_KEYS, ALLOWED_YES_NO_CD, load_jsonl, gold_of, clamp01, clamp11, yesno_to_label
+from json_utils import REQ_KEYS, ALLOWED_YES_NO_CD, load_jsonl, gold_of, clamp01, clamp11, yesno_to_label, is_valid_text, user_text
 
 # ---------------- I/O ----------------
 
@@ -189,8 +189,23 @@ def score_models(
     yn_thresh: float | None,
     yn_metric: str,
     cd_map_str: str,
+    min_text_len: int = 0,
 ) -> pd.DataFrame:
     val = load_val_examples(val_file)
+    
+    # Filter out examples with insufficient text content if requested
+    if min_text_len > 0:
+        original_count = len(val)
+        filtered_val = []
+        for ex in val:
+            text_content = user_text(ex)
+            if is_valid_text(text_content, min_text_len):
+                filtered_val.append(ex)
+        
+        filtered_count = original_count - len(filtered_val)
+        if filtered_count > 0:
+            print(f"[info] Filtered out {filtered_count}/{original_count} examples with insufficient text (< {min_text_len} chars)")
+        val = filtered_val
 
     # Prepare per-model predictions
     models: List[str] = []
@@ -330,6 +345,8 @@ def main():
                     help="Metric for dichotomous vars (china_sensitive, collective_action). Default: f1.")
     ap.add_argument("--cd-map", default="yes=1,no=0,cannot_determine=0.5",
                     help="Mapping used when --yn-metric r2. Format: 'yes=1,no=0,cannot_determine=0.5'")
+    ap.add_argument("--min-text-len", type=int, default=0,
+                    help="Minimum text length to include example in evaluation (default: 0, no filtering)")
     ap.add_argument("--out", help="Optional path to write the summary table CSV.")
     ap.add_argument("preds", nargs="+", help="One or more parsed prediction files (from parse.py).")
     args = ap.parse_args()
@@ -341,6 +358,7 @@ def main():
         yn_thresh=args.yn_thresh,
         yn_metric=args.yn_metric,
         cd_map_str=args.cd_map,
+        min_text_len=args.min_text_len,
     )
 
     # Select columns that actually exist in the dataframe

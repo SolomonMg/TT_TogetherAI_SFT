@@ -1,4 +1,24 @@
 # json_utils.py
+"""
+Utility functions for data processing in the TikTok SFT pipeline.
+
+This module provides:
+- File I/O functions for JSONL, CSV, and Parquet files
+- Data processing utilities for cleaning and normalizing data
+- JSON extraction and validation functions
+- Schema validation for model outputs
+- Functions for merging model predictions back with original data
+
+Example usage for merging predictions with CSV:
+    python -c "
+    from json_utils import merge_predictions_with_csv
+    merge_predictions_with_csv(
+        csv_path='data/df_for_label_removal_2.csv',
+        parsed_jsonl_path='out/preds_label_removal_2.parsed.jsonl', 
+        output_path='data/df_for_label_removal_2_with_preds.csv'
+    )
+    "
+"""
 import json, re, os
 import pandas as pd
 from typing import Optional, List
@@ -86,6 +106,24 @@ def safe_text(x) -> str:
     except Exception:
         pass
     return str(x).strip()
+
+def is_valid_text(text: str, min_len: int = 10) -> bool:
+    """Check if text is valid (not empty, NA, NULL, or too short)."""
+    if not text or not isinstance(text, str):
+        return False
+    
+    text = text.strip().lower()
+    
+    # Filter out common missing value indicators
+    invalid_values = {"", "na", "null", "none", "n/a", "nan", "missing"}
+    if text in invalid_values:
+        return False
+    
+    # Check minimum length
+    if len(text) < min_len:
+        return False
+        
+    return True
 
 def to_str_meta(x) -> str:
     """Convert meta_id to string, handling floats like 123.0 -> 123."""
@@ -239,3 +277,61 @@ def extract_json_best(text: str) -> tuple[dict, bool]:
         return obj, True
 
     return {"invalid": True}, False
+
+def merge_predictions_with_csv(csv_path: str, parsed_jsonl_path: str, output_path: str) -> None:
+    """
+    Merge model predictions back with original CSV data.
+    
+    Args:
+        csv_path: Path to original CSV file with meta_id column
+        parsed_jsonl_path: Path to parsed predictions JSONL (from parse.py)
+        output_path: Path to write merged CSV with prediction columns
+    """
+    import os
+    
+    # Load original CSV
+    print(f"[info] Loading original CSV: {csv_path}")
+    df = load_table(csv_path)
+    df = norm_cols(df)  # Normalize column names
+    
+    if "meta_id" not in df.columns:
+        raise RuntimeError("[error] Original CSV missing meta_id column")
+    
+    # Load parsed predictions
+    print(f"[info] Loading parsed predictions: {parsed_jsonl_path}")
+    parsed_data = load_jsonl(parsed_jsonl_path)
+    
+    # Create mapping of meta_id -> predictions
+    pred_map = {}
+    for row in parsed_data:
+        if row.get("parsed") and row.get("json"):
+            meta_id = str(row.get("meta_id", ""))
+            if meta_id:
+                pred_map[meta_id] = row["json"]
+    
+    print(f"[info] Found predictions for {len(pred_map)} examples")
+    
+    # Add prediction columns
+    df["pred_china_stance_score"] = None
+    df["pred_china_sensitive"] = None
+    df["pred_collective_action"] = None
+    df["pred_parsed"] = False
+    
+    # Merge predictions by meta_id
+    matched = 0
+    for idx, row in df.iterrows():
+        meta_id = str(row["meta_id"])
+        if meta_id in pred_map:
+            pred = pred_map[meta_id]
+            df.at[idx, "pred_china_stance_score"] = pred.get("china_stance_score")
+            df.at[idx, "pred_china_sensitive"] = pred.get("china_sensitive") 
+            df.at[idx, "pred_collective_action"] = pred.get("collective_action")
+            df.at[idx, "pred_parsed"] = True
+            matched += 1
+    
+    print(f"[info] Matched predictions for {matched}/{len(df)} rows ({matched/len(df)*100:.1f}%)")
+    
+    # Write merged CSV
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    df.to_csv(output_path, index=False)
+    print(f"[write] {output_path}  n={len(df)} (with {matched} predictions)")

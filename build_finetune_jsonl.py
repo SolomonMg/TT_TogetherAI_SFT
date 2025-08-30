@@ -37,7 +37,7 @@ import argparse
 import pandas as pd
 from json_utils import (
     load_table, norm_cols, to_str_meta, clamp11, safe_text, 
-    write_jsonl
+    write_jsonl, is_valid_text
 )
 
 SYSTEM_PROMPT = (
@@ -61,10 +61,13 @@ SYSTEM_PROMPT = (
 def build_user_text(transcript: str, description: str) -> str:
     """Combine transcript and description into user message format."""
     parts = []
-    if transcript.strip():
+    
+    # Include any non-empty text content
+    if transcript and transcript.strip():
         parts.append(f"TRANSCRIPT:\n{transcript.strip()}")
-    if description.strip():
+    if description and description.strip():
         parts.append(f"DESCRIPTION:\n{description.strip()}")
+        
     return "\n\n".join(parts)
 
 def labelize_sensitive(value: float, thresh: float = 0.5) -> str:
@@ -73,7 +76,7 @@ def labelize_sensitive(value: float, thresh: float = 0.5) -> str:
         return "cannot_determine"
     return "yes" if float(value) >= thresh else "no"
 
-def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5):
+def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_text_len: int = 10):
     """Process single labeled file into JSONL format."""
     print(f"[info] Loading {input_path}")
     df = norm_cols(load_table(input_path))
@@ -109,12 +112,16 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5):
         raise SystemExit("[error] No text content columns found (need subtitle/transcript and/or meta_desc/description)")
     
     print(f"[info] Using text columns: transcript='{transcript_col}', description='{desc_col}'")
+    print(f"[info] Text filtering: minimum {min_text_len} characters combined text")
     print(f"[info] Processing {len(df)} rows")
     
     rows = []
+    filtered_count = 0
+    
     for _, r in df.iterrows():
         meta_id = to_str_meta(r[meta_col])
         if not meta_id:
+            filtered_count += 1
             continue
             
         # Extract text content
@@ -122,14 +129,17 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5):
         description = safe_text(r.get(desc_col, "")) if desc_col else ""
         user_text = build_user_text(transcript, description)
         
-        if not user_text.strip():
-            print(f"[warning] Empty text content for meta_id {meta_id}, skipping")
+        # Check combined text length
+        if not user_text.strip() or not is_valid_text(user_text, min_text_len):
+            print(f"[warning] Insufficient text content for meta_id {meta_id} (< {min_text_len} chars), skipping")
+            filtered_count += 1
             continue
         
         # Build gold JSON
         stance = clamp11(r["china_stance_score"])
         if pd.isna(stance):
             print(f"[warning] Invalid stance score for meta_id {meta_id}, skipping")
+            filtered_count += 1
             continue
             
         sensitive_label = labelize_sensitive(r["sensitive"], yn_thresh)
@@ -157,6 +167,7 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5):
         })
     
     print(f"[info] Successfully processed {len(rows)} examples")
+    print(f"[info] Filtered out {filtered_count} rows due to missing/insufficient data")
     write_jsonl(output_path, rows)
 
 def main():
@@ -165,10 +176,12 @@ def main():
     parser.add_argument("--output", required=True, help="Output JSONL file")
     parser.add_argument("--yn-thresh", type=float, default=0.5, 
                        help="Threshold for converting numeric labels to yes/no (default: 0.5)")
+    parser.add_argument("--min-text-len", type=int, default=10,
+                       help="Minimum combined text length to include row (default: 10)")
     
     args = parser.parse_args()
     
-    process_file(args.input, args.output, args.yn_thresh)
+    process_file(args.input, args.output, args.yn_thresh, args.min_text_len)
 
 if __name__ == "__main__":
     main()
