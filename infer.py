@@ -47,19 +47,11 @@ from together import Together
 
 TOGETHER_CHAT_URL = "https://api.together.xyz/v1/chat/completions"
 
-FORMAT_ENFORCER_TXT = (
-    "Return ONLY a minified JSON object with exactly these keys: "
-    "china_stance_score, china_sensitive, collective_action, languages. "
-    "No extra text."
-)
-
 from json_utils import load_jsonl
 
-def prompt_messages(example: dict, append_enforcer: bool) -> List[Dict[str, str]]:
+def prompt_messages(example: dict) -> List[Dict[str, str]]:
     # Hide gold (last assistant) and keep original user/system roles
     msgs = [{"role": m["role"], "content": m["content"]} for m in example["messages"][:-1]]
-    if append_enforcer:
-        msgs.append({"role": "system", "content": FORMAT_ENFORCER_TXT})
     return msgs
 
 def _brace_unbalanced(s: str) -> bool:
@@ -184,9 +176,9 @@ async def one_example(idx: int,
                       retry_on_trunc: bool,
                       growth: float,
                       max_tokens_cap: int,
-                      append_enforcer: bool,
                       effort: str) -> dict:
-    msgs = prompt_messages(ex, append_enforcer=append_enforcer)
+    msgs = prompt_messages(ex)
+    meta_id = ex.get("meta_id", str(idx))  # Extract meta_id from example, fallback to idx
     cur_tokens = max_tokens
     attempt = 0
     while True:
@@ -212,6 +204,7 @@ async def one_example(idx: int,
 
             return {
                 "idx": idx,
+                "meta_id": meta_id,
                 "raw": text,
                 "attempt": attempt,
                 "latency_s": round(latency, 3),
@@ -225,6 +218,7 @@ async def one_example(idx: int,
             if attempt >= retries:
                 return {
                     "idx": idx,
+                    "meta_id": meta_id,
                     "raw": f"<<REQUEST FAILED: {e}>>",
                     "attempt": attempt,
                     "latency_s": round(latency, 3),
@@ -250,7 +244,6 @@ async def main(val_file: str,
                retry_on_trunc: bool,
                growth: float,
                max_tokens_cap: int,
-               append_enforcer: bool,
                effort: str):
     if not os.environ.get("TOGETHER_API_KEY"):
         raise SystemExit("Please export TOGETHER_API_KEY")
@@ -281,7 +274,7 @@ async def main(val_file: str,
                 temperature=temperature, max_tokens=max_tokens, retries=retries,
                 base_sleep=base_sleep, timeout_s=timeout_s,
                 retry_on_trunc=retry_on_trunc, growth=growth, max_tokens_cap=max_tokens_cap,
-                append_enforcer=append_enforcer, effort=effort)
+                effort=effort)
 
     t0 = time.time()
     results = await asyncio.gather(*[runner(i, ex) for i, ex in enumerate(data)])
@@ -311,8 +304,6 @@ if __name__ == "__main__":
     ap.add_argument("--retry-on-trunc", action="store_true", help="Retry if output looks truncated")
     ap.add_argument("--max-tokens-cap", type=int, default=512, help="Upper bound for token growth")
     ap.add_argument("--growth", type=float, default=1.8, help="Growth factor for max_tokens on truncation")
-    ap.add_argument("--append-enforcer", action="store_true",
-                    help="Append a JSON-only system nudge to each prompt")
     ap.add_argument("--effort", default="low", choices=["low", "medium", "high"],
                     help="reasoning effort sent to the API (models may ignore)")
 
@@ -324,4 +315,4 @@ if __name__ == "__main__":
         limit=args.limit, transport=args.transport, timeout_s=args.per_call_timeout,
         warmup=args.warmup, retry_on_trunc=args.retry_on_trunc,
         growth=args.growth, max_tokens_cap=args.max_tokens_cap,
-        append_enforcer=args.append_enforcer, effort=args.effort))
+        effort=args.effort))

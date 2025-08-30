@@ -5,7 +5,7 @@ score.py — Summarize model performance vs. human coders.
 - Accepts multiple parsed prediction files (from parse.py).
 - Displays one row per model (row label = predictions file basename).
 - Columns shown:
-    stance_R2,
+    stance_R2, stance_pos_F1, stance_neg_F1,
     ch_sensitive_F (or ch_sensitive_R2 if --yn-metric r2),
     col_action_F   (or col_action_R2 if --yn-metric r2)
 
@@ -19,6 +19,7 @@ R² for dichotomous vars:
 Usage examples:
   python score.py --val-file data/val_BAL.jsonl --yn-metric f1 out/preds_a.parsed.jsonl out/preds_b.parsed.jsonl
   python score.py --val-file data/val_BAL_new.jsonl --yn-metric r2 out/preds_gpt-oss_new.parsed.jsonl
+  python score.py --val-file data/validation_minimal.jsonl --yn-metric r2 out/preds_minimal.parsed.jsonl
 """
 
 import os
@@ -36,24 +37,28 @@ from json_utils import REQ_KEYS, ALLOWED_YES_NO_CD, load_jsonl, gold_of, clamp01
 
 def load_val_examples(val_path: str) -> List[dict]:
     data = load_jsonl(val_path)
+    required_keys = {"china_stance_score", "china_sensitive"}  # Minimum required keys
     for i, ex in enumerate(data):
         g = gold_of(ex)
-        if set(g.keys()) != REQ_KEYS:
-            raise RuntimeError(f"{val_path}: example {i} gold keys {set(g.keys())} != {REQ_KEYS}")
+        if not required_keys.issubset(set(g.keys())):
+            raise RuntimeError(f"{val_path}: example {i} gold missing required keys {required_keys - set(g.keys())}")
     return data
 
 # gold_of now imported from json_utils
 
-def load_parsed_preds(pred_path: str) -> Dict[int, dict]:
+def load_parsed_preds(pred_path: str) -> Dict[str, dict]:
     """
     parse.py outputs rows like:
-      {"idx": 0, "parsed": true, "json": {...}}
-    Return: idx -> prediction dict (only for parsed==True)
+      {"idx": 0, "meta_id": "12345", "parsed": true, "json": {...}}
+    Return: meta_id -> prediction dict (only for parsed==True)
     """
     out = {}
     for row in load_jsonl(pred_path):
-        if isinstance(row, dict) and row.get("parsed") and "idx" in row and isinstance(row.get("json"), dict):
-            out[int(row["idx"])] = row["json"]
+        if isinstance(row, dict) and row.get("parsed") and isinstance(row.get("json"), dict):
+            # Use meta_id if available, fallback to idx for backward compatibility
+            key = row.get("meta_id", str(row.get("idx", "")))
+            if key:
+                out[str(key)] = row["json"]
     return out
 
 def model_name_from_path(path: str) -> str:
@@ -97,10 +102,11 @@ def derive_label(pred: dict, score_key: str, label_key: str, yn_thresh: float | 
 def numeric_from_pred_or_label(pred: dict, prefix: str, cd_map: Dict[str,float]) -> float:
     """
     Try to pull a numeric probability/score for a dichotomous var.
-    Known candidates: <prefix>_{score,prob,yes_prob,p}.
+    Known candidates: <prefix>_{score,prob,yes_prob,p} and prefix itself.
     Fallback: map the categorical label via cd_map.
     """
     candidates = [
+        prefix,  # Check the base field name first
         f"{prefix}_score",
         f"{prefix}_prob",
         f"{prefix}_yes_prob",
@@ -108,9 +114,16 @@ def numeric_from_pred_or_label(pred: dict, prefix: str, cd_map: Dict[str,float])
     ]
     for k in candidates:
         if k in pred:
-            v = clamp01(pred[k])
+            val = pred[k]
+            # If it's already numeric, use it directly
+            if isinstance(val, (int, float)):
+                return clamp01(val)
+            # Otherwise try to convert
+            v = clamp01(val)
             if v is not None:
                 return v
+    
+    # Fallback to label mapping
     lab = yesno_to_label(pred.get(prefix))
     return cd_map.get(lab, np.nan)
 
@@ -143,6 +156,30 @@ def r2_on_arrays(g_nums, p_nums):
         return np.nan
     return float(r2_score(g[mask], p[mask]))
 
+def stance_f1_positive(gold_scores: List[float], pred_scores: List[float]) -> float:
+    """F1 for positive stance classification (> 0 vs <= 0)"""
+    def to_positive(x): return 1 if (isinstance(x, (int, float)) and not np.isnan(x) and x > 0) else 0
+    y_true = np.array([to_positive(clamp11(x)) for x in gold_scores], dtype=int)
+    y_pred = np.array([to_positive(clamp11(x)) for x in pred_scores], dtype=int)
+    if y_true.size == 0:
+        return np.nan
+    _, _, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average='binary', pos_label=1, zero_division=0
+    )
+    return float(f1)
+
+def stance_f1_negative(gold_scores: List[float], pred_scores: List[float]) -> float:
+    """F1 for negative stance classification (< 0 vs >= 0)"""
+    def to_negative(x): return 1 if (isinstance(x, (int, float)) and not np.isnan(x) and x < 0) else 0
+    y_true = np.array([to_negative(clamp11(x)) for x in gold_scores], dtype=int)
+    y_pred = np.array([to_negative(clamp11(x)) for x in pred_scores], dtype=int)
+    if y_true.size == 0:
+        return np.nan
+    _, _, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average='binary', pos_label=1, zero_division=0
+    )
+    return float(f1)
+
 # ---------------- Core scoring ----------------
 
 def score_models(
@@ -154,11 +191,10 @@ def score_models(
     cd_map_str: str,
 ) -> pd.DataFrame:
     val = load_val_examples(val_file)
-    n = len(val)
 
     # Prepare per-model predictions
     models: List[str] = []
-    preds_by_model: List[Dict[int, dict]] = []
+    preds_by_model: List[Dict[str, dict]] = []
     name_counts = {}
     for p in pred_paths:
         name = model_name_from_path(p)
@@ -175,55 +211,107 @@ def score_models(
 
     # Gold fields
     gold_stance = [clamp11(gold_of(ex)["china_stance_score"]) for ex in val]
-    gold_sensitive = [yesno_to_label(gold_of(ex)["china_sensitive"]) for ex in val]
-    gold_collective = [yesno_to_label(gold_of(ex)["collective_action"]) for ex in val]
+    
+    # For china_sensitive, use numeric values if they exist, otherwise convert labels
+    gold_sensitive_raw = [gold_of(ex)["china_sensitive"] for ex in val]
+    if isinstance(gold_sensitive_raw[0], (int, float)):
+        # Numeric gold values - use directly for R² or convert for F1
+        gold_sensitive = gold_sensitive_raw if yn_metric == "r2" else [yesno_to_label(x) for x in gold_sensitive_raw]
+    else:
+        # String gold values - convert to labels
+        gold_sensitive = [yesno_to_label(x) for x in gold_sensitive_raw]
+    
+    # collective_action is optional
+    has_collective_action = "collective_action" in gold_of(val[0])
+    if has_collective_action:
+        gold_collective_raw = [gold_of(ex)["collective_action"] for ex in val]
+        if isinstance(gold_collective_raw[0], (int, float)):
+            # Numeric gold values - use directly for R² or convert for F1
+            gold_collective = gold_collective_raw if yn_metric == "r2" else [yesno_to_label(x) for x in gold_collective_raw]
+        else:
+            # String gold values - convert to labels
+            gold_collective = [yesno_to_label(x) for x in gold_collective_raw]
+    else:
+        gold_collective = None
 
     # Quick prevalence hint (if all one class, sklearn returns R²=0)
     uniq_sens = sorted(set(gold_sensitive))
-    uniq_coll = sorted(set(gold_collective))
     if len(set(gold_sensitive)) == 1:
         print(f"[note] gold china_sensitive constant: {uniq_sens[0]}")
-    if len(set(gold_collective)) == 1:
-        print(f"[note] gold collective_action constant: {uniq_coll[0]}")
+    if has_collective_action:
+        uniq_coll = sorted(set(gold_collective))
+        if len(set(gold_collective)) == 1:
+            print(f"[note] gold collective_action constant: {uniq_coll[0]}")
 
     for mname, mmap in zip(models, preds_by_model):
-        # stance scores
-        pred_stance = [clamp11(mmap.get(i, {}).get("china_stance_score")) for i in range(n)]
+        # Align predictions with validation data using meta_id
+        pred_stance = []
+        for ex in val:
+            meta_id = str(ex.get("meta_id", ""))
+            pred = mmap.get(meta_id, {})
+            pred_stance.append(clamp11(pred.get("china_stance_score")))
+        
         stance_r2_val = stance_r2(gold_stance, pred_stance)
+        stance_pos_f1 = stance_f1_positive(gold_stance, pred_stance)
+        stance_neg_f1 = stance_f1_negative(gold_stance, pred_stance)
 
         # dich vars
         if yn_metric == "f1":
-            pred_sensitive_labels = [
-                derive_label(mmap.get(i, {}), "china_sensitive_score", "china_sensitive", yn_thresh)
-                for i in range(n)
-            ]
-            pred_collective_labels = [
-                derive_label(mmap.get(i, {}), "collective_action_score", "collective_action", yn_thresh)
-                for i in range(n)
-            ]
+            pred_sensitive_labels = []
+            for ex in val:
+                meta_id = str(ex.get("meta_id", ""))
+                pred = mmap.get(meta_id, {})
+                pred_sensitive_labels.append(
+                    derive_label(pred, "china_sensitive_score", "china_sensitive", yn_thresh)
+                )
             row = {
                 "model": mname,
                 "stance_R2": stance_r2_val,
+                "stance_pos_F1": stance_pos_f1,
+                "stance_neg_F1": stance_neg_f1,
                 "ch_sensitive_F": f1_yes(gold_sensitive, pred_sensitive_labels),
-                "col_action_F":  f1_yes(gold_collective, pred_collective_labels),
             }
+            if has_collective_action:
+                pred_collective_labels = []
+                for ex in val:
+                    meta_id = str(ex.get("meta_id", ""))
+                    pred = mmap.get(meta_id, {})
+                    pred_collective_labels.append(
+                        derive_label(pred, "collective_action_score", "collective_action", yn_thresh)
+                    )
+                row["col_action_F"] = f1_yes(gold_collective, pred_collective_labels)
         else:  # yn_metric == "r2"
-            gold_sensitive_num = [cd_map.get(x, np.nan) for x in gold_sensitive]
-            gold_collective_num = [cd_map.get(x, np.nan) for x in gold_collective]
-            pred_sensitive_num = [
-                numeric_from_pred_or_label(mmap.get(i, {}), "china_sensitive", cd_map)
-                for i in range(n)
-            ]
-            pred_collective_num = [
-                numeric_from_pred_or_label(mmap.get(i, {}), "collective_action", cd_map)
-                for i in range(n)
-            ]
+            # Use numeric gold values directly (no cd_map conversion needed)
+            if isinstance(gold_sensitive[0], (int, float)):
+                gold_sensitive_num = gold_sensitive
+            else:
+                gold_sensitive_num = [cd_map.get(x, np.nan) for x in gold_sensitive]
+            
+            pred_sensitive_num = []
+            for ex in val:
+                meta_id = str(ex.get("meta_id", ""))
+                pred = mmap.get(meta_id, {})
+                pred_sensitive_num.append(numeric_from_pred_or_label(pred, "china_sensitive", cd_map))
             row = {
                 "model": mname,
                 "stance_R2": stance_r2_val,
+                "stance_pos_F1": stance_pos_f1,
+                "stance_neg_F1": stance_neg_f1,
                 "ch_sensitive_R2": r2_on_arrays(gold_sensitive_num, pred_sensitive_num),
-                "col_action_R2":  r2_on_arrays(gold_collective_num, pred_collective_num),
             }
+            if has_collective_action:
+                # Use numeric gold values directly (no cd_map conversion needed)
+                if isinstance(gold_collective[0], (int, float)):
+                    gold_collective_num = gold_collective
+                else:
+                    gold_collective_num = [cd_map.get(x, np.nan) for x in gold_collective]
+                
+                pred_collective_num = []
+                for ex in val:
+                    meta_id = str(ex.get("meta_id", ""))
+                    pred = mmap.get(meta_id, {})
+                    pred_collective_num.append(numeric_from_pred_or_label(pred, "collective_action", cd_map))
+                row["col_action_R2"] = r2_on_arrays(gold_collective_num, pred_collective_num)
         rows.append(row)
 
     df = pd.DataFrame(rows).set_index("model")
@@ -255,10 +343,13 @@ def main():
         cd_map_str=args.cd_map,
     )
 
+    # Select columns that actually exist in the dataframe
     if args.yn_metric == "f1":
-        cols = ["stance_R2","ch_sensitive_F","col_action_F"]
+        potential_cols = ["stance_R2","stance_pos_F1","stance_neg_F1","ch_sensitive_F","col_action_F"]
     else:
-        cols = ["stance_R2","ch_sensitive_R2","col_action_R2"]
+        potential_cols = ["stance_R2","stance_pos_F1","stance_neg_F1","ch_sensitive_R2","col_action_R2"]
+    
+    cols = [c for c in potential_cols if c in df.columns]
 
     print(df[cols].to_string(float_format=lambda x: f"{x:.3f}"))
 

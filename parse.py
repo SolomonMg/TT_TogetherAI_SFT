@@ -17,8 +17,8 @@ python parse.py \
   --print-bad 5
 
 python parse.py \
-  --raw out/preds_gpt-oss_new.raw.jsonl \
-  --out out/preds_gpt-oss_new.parsed.jsonl \
+  --raw out/preds_minimal.raw.jsonl \
+  --out out/preds_minimal.parsed.jsonl \
   --print-bad 5
 
 python parse.py \
@@ -215,15 +215,16 @@ def run(raw: str, out: str, print_bad: int = 0):
     with open(out, "w", encoding="utf-8") as fw:
         for rec in raw_recs:
             idx = rec.get("idx")
+            meta_id = rec.get("meta_id", str(idx))  # Extract meta_id, fallback to idx
             text = rec.get("raw", "")
             obj, parsed, mode = extract_first_valid_json(text)
             if parsed:
                 ok += 1
-                out_rec = {"idx": idx, "parsed": True, "raw": text, "json": obj}
+                out_rec = {"idx": idx, "meta_id": meta_id, "parsed": True, "raw": text, "json": obj}
             else:
-                out_rec = {"idx": idx, "parsed": False, "raw": text, "json": None}
+                out_rec = {"idx": idx, "meta_id": meta_id, "parsed": False, "raw": text, "json": None}
                 with open(bad_log, "a", encoding="utf-8") as bl:
-                    bl.write(f"IDX={idx}\n{text}\n---\n")
+                    bl.write(f"IDX={idx} META_ID={meta_id}\n{text}\n---\n")
             fw.write(json.dumps(out_rec, ensure_ascii=False) + "\n")
 
     total = len(raw_recs)

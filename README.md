@@ -25,18 +25,38 @@ export TOGETHER_API_KEY=your_api_key_here
 
 ---
 
-## Data format (expected)
+## Data Processing
 
-Validation (and train) files are JSONL. Each line contains an OpenAI-style chat session. The **last** message is the gold assistant JSON:
+### Input Data
+The pipeline expects a CSV or Parquet file with:
+- `meta_id`: unique video identifier
+- `china_stance_score`: float in [-1,1] 
+- `sensitive`: numeric (0-1 range)
+- `collective_action`: numeric (0-1 range) [optional]
+- Text content: `subtitle`/`transcript` and `meta_desc`/`description` columns
+
+### JSONL Format
+Training/validation files are JSONL. Each line contains an OpenAI-style chat session with the **last** message containing gold labels:
 
 ```json
 {
+  "meta_id": "7425716691029593386",
   "messages": [
-    {"role":"system","content":"You are a meticulous labeling assistant... (format rules here)"},
-    {"role":"user","content":"Transcript: ..."},
-    {"role":"assistant","content":"{\"china_stance_score\":0.1,\"china_sensitive\":\"no\",\"collective_action\":\"no\",\"languages\":[\"english\"]}"}
+    {"role":"system","content":"You are a meticulous labeling assistant..."},
+    {"role":"user","content":"TRANSCRIPT:\n...\n\nDESCRIPTION:\n..."},
+    {"role":"assistant","content":"{\"china_stance_score\":0.1,\"china_sensitive\":\"no\",\"collective_action\":\"no\"}"}
   ]
 }
+```
+
+### Build JSONL
+```bash
+# From single merged file (recommended)
+python build_finetune_jsonl.py --input data/china_labeling_sample_all_Jul30_merged.csv --output data/val_merged.jsonl
+
+# From balanced splits
+python build_finetune_jsonl.py --input data/labels_bal_train.csv --output data/train_BAL.jsonl
+python build_finetune_jsonl.py --input data/labels_bal_val.csv --output data/val_BAL.jsonl
 ```
 
 **Schema (assistant JSON)**
@@ -45,8 +65,7 @@ Validation (and train) files are JSONL. Each line contains an OpenAI-style chat 
 {
   "china_stance_score": "float in [-1,1]",
   "china_sensitive": "yes | no | cannot_determine",
-  "collective_action": "yes | no | cannot_determine",
-  "languages": ["english","mandarin","spanish","other","no_language"]
+  "collective_action": "yes | no | cannot_determine" 
 }
 ```
 
@@ -123,9 +142,10 @@ python score.py   --val-file data/val_BAL.jsonl   --preds   out/preds_base.parse
 
 **Outputs shown**
 - JSON parse rate
-- Exact match (all fields within `eps`)
-- Per-field precision/recall/F1 (including one-vs-rest stance thresholds)
-- Regression metrics for `china_stance_score` (MAE/RMSE/R²/Pearson/Spearman)
+- Stance R² (regression performance)
+- Stance F1 for positive/negative classification (> 0 vs ≤ 0, < 0 vs ≥ 0)
+- Sensitivity F1 (binary classification performance)
+- Collective action F1 (if present)
 - Optional per-example CSV
 
 ---
