@@ -2,33 +2,36 @@
 """
 build_finetune_jsonl.py
 
-Simplified JSONL builder for evaluation/training. Single responsibility:
-- Input: Single CSV/Parquet with labels + text content (already merged)
+Simplified JSONL builder for evaluation/training/inference. Single responsibility:
+- Input: Single CSV/Parquet with text content (optionally with labels)
 - Output: JSONL with OpenAI chat format
 
 Usage:
+    # For training/validation (with labels)
     python build_finetune_jsonl.py \
         --input data/china_labeling_sample_all_Jul30_merged.csv \
         --output data/val_merged.jsonl
+    
+    # For inference (no labels required)
+    python build_finetune_jsonl.py \
+        --input data/unlabeled_data.csv \
+        --output data/inference.jsonl \
+        --no-labels
 
 Input file must contain:
 - meta_id: unique identifier
-- china_stance_score: float in [-1, 1] 
-- sensitive: numeric (0-1 range)
-- collective_action: numeric (0-1 range) [optional]
 - Text content in one of these column combinations:
   * subtitle + meta_desc, OR
   * transcript + description
 
+For labeled data (--label-mode, default):
+- china_stance_score: float in [-1, 1] 
+- sensitive: numeric (0-1 range)
+- collective_action: numeric (0-1 range) [optional]
+
 Output JSONL format:
-{
-  "meta_id": "...",
-  "messages": [
-    {"role": "system", "content": "..."},
-    {"role": "user", "content": "TRANSCRIPT:...\\nDESCRIPTION:..."},
-    {"role": "assistant", "content": "{\\"china_stance_score\\":...}"}
-  ]
-}
+With labels: {"meta_id": "...", "messages": [system, user, assistant]}
+Without labels: {"meta_id": "...", "messages": [system, user]}
 """
 
 import json
@@ -76,7 +79,7 @@ def labelize_sensitive(value: float, thresh: float = 0.5) -> str:
         return "cannot_determine"
     return "yes" if float(value) >= thresh else "no"
 
-def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_text_len: int = 10):
+def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_text_len: int = 10, label_mode: bool = True):
     """Process single labeled file into JSONL format."""
     print(f"[info] Loading {input_path}")
     df = norm_cols(load_table(input_path))
@@ -90,11 +93,12 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_
     if not meta_col:
         raise SystemExit("[error] Input file missing meta_id or id column")
     
-    # Check for required label columns
-    required_cols = ["china_stance_score", "sensitive"]
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise SystemExit(f"[error] Missing required columns: {missing}")
+    # Check for required label columns (only in label mode)
+    if label_mode:
+        required_cols = ["china_stance_score", "sensitive"]
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            raise SystemExit(f"[error] Missing required columns: {missing}")
     
     # Check for text content columns (flexible naming)
     transcript_col = None
@@ -135,31 +139,35 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_
             filtered_count += 1
             continue
         
-        # Build gold JSON
-        stance = clamp11(r["china_stance_score"])
-        if pd.isna(stance):
-            print(f"[warning] Invalid stance score for meta_id {meta_id}, skipping")
-            filtered_count += 1
-            continue
-            
-        sensitive_label = labelize_sensitive(r["sensitive"], yn_thresh)
-        
-        gold = {
-            "china_stance_score": float(stance),
-            "china_sensitive": sensitive_label
-        }
-        
-        # Add collective_action if present
-        if "collective_action" in df.columns and not pd.isna(r["collective_action"]):
-            collective_label = labelize_sensitive(r["collective_action"], yn_thresh)
-            gold["collective_action"] = collective_label
-        
         # Create messages
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_text},
-            {"role": "assistant", "content": json.dumps(gold, ensure_ascii=False, separators=(",", ":"))}
+            {"role": "user", "content": user_text}
         ]
+        
+        # Add assistant message with gold labels only in label mode
+        if label_mode:
+            # Build gold JSON
+            stance = clamp11(r["china_stance_score"])
+            if pd.isna(stance):
+                print(f"[warning] Invalid stance score for meta_id {meta_id}, skipping")
+                filtered_count += 1
+                continue
+                
+            sensitive_label = labelize_sensitive(r["sensitive"], yn_thresh)
+            
+            gold = {
+                "china_stance_score": float(stance),
+                "china_sensitive": sensitive_label
+            }
+            
+            # Add collective_action if present
+            if "collective_action" in df.columns and not pd.isna(r["collective_action"]):
+                collective_label = labelize_sensitive(r["collective_action"], yn_thresh)
+                gold["collective_action"] = collective_label
+            
+            messages.append({"role": "assistant", "content": json.dumps(gold, ensure_ascii=False, separators=(",", ":"))})
+        
         
         rows.append({
             "meta_id": meta_id,
@@ -171,17 +179,21 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_
     write_jsonl(output_path, rows)
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert labeled CSV/Parquet to JSONL format")
-    parser.add_argument("--input", required=True, help="Input CSV or Parquet file with labels and text")
+    parser = argparse.ArgumentParser(description="Convert CSV/Parquet to JSONL format for training or inference")
+    parser.add_argument("--input", required=True, help="Input CSV or Parquet file with text content")
     parser.add_argument("--output", required=True, help="Output JSONL file")
     parser.add_argument("--yn-thresh", type=float, default=0.5, 
                        help="Threshold for converting numeric labels to yes/no (default: 0.5)")
     parser.add_argument("--min-text-len", type=int, default=10,
                        help="Minimum combined text length to include row (default: 10)")
+    parser.add_argument("--label-mode", action="store_true", default=True,
+                       help="Include gold standard labels in output (default: true)")
+    parser.add_argument("--no-labels", action="store_false", dest="label_mode",
+                       help="Skip gold standard labels for inference-only data")
     
     args = parser.parse_args()
     
-    process_file(args.input, args.output, args.yn_thresh, args.min_text_len)
+    process_file(args.input, args.output, args.yn_thresh, args.min_text_len, args.label_mode)
 
 if __name__ == "__main__":
     main()
