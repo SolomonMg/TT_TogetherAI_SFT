@@ -179,17 +179,21 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_
     write_jsonl(output_path, rows)
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert labeled CSV/Parquet to JSONL format")
-    parser.add_argument("--input", required=True, help="Input CSV or Parquet file with labels and text")
+    parser = argparse.ArgumentParser(description="Convert CSV/Parquet to JSONL format for training or inference")
+    parser.add_argument("--input", required=True, help="Input CSV or Parquet file with text content")
     parser.add_argument("--output", required=True, help="Output JSONL file")
     parser.add_argument("--yn-thresh", type=float, default=0.5, 
                        help="Threshold for converting numeric labels to yes/no (default: 0.5)")
     parser.add_argument("--min-text-len", type=int, default=10,
                        help="Minimum combined text length to include row (default: 10)")
+    parser.add_argument("--label-mode", action="store_true", default=True,
+                       help="Include gold standard labels in output (default: true)")
+    parser.add_argument("--no-labels", action="store_false", dest="label_mode",
+                       help="Skip gold standard labels for inference-only data")
     
     args = parser.parse_args()
     
-    process_file(args.input, args.output, args.yn_thresh, args.min_text_len)
+    process_file(args.input, args.output, args.yn_thresh, args.min_text_len, args.label_mode)
 
 if __name__ == "__main__":
     main()
