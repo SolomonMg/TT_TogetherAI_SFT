@@ -50,8 +50,16 @@ TOGETHER_CHAT_URL = "https://api.together.xyz/v1/chat/completions"
 from json_utils import load_jsonl
 
 def prompt_messages(example: dict) -> List[Dict[str, str]]:
-    # Hide gold (last assistant) and keep original user/system roles
-    msgs = [{"role": m["role"], "content": m["content"]} for m in example["messages"][:-1]]
+    # Handle both validation data (with assistant messages) and inference data (without)
+    messages = example["messages"]
+    
+    # If last message is from assistant, hide it (validation data)
+    if messages and messages[-1]["role"] == "assistant":
+        msgs = [{"role": m["role"], "content": m["content"]} for m in messages[:-1]]
+    else:
+        # Inference data - use all messages as-is
+        msgs = [{"role": m["role"], "content": m["content"]} for m in messages]
+    
     return msgs
 
 def _brace_unbalanced(s: str) -> bool:
@@ -238,6 +246,7 @@ async def main(val_file: str,
                retries: int,
                base_sleep: float,
                limit: int,
+               skip: int,
                transport: str,
                timeout_s: float,
                warmup: int,
@@ -248,6 +257,15 @@ async def main(val_file: str,
     if not os.environ.get("TOGETHER_API_KEY"):
         raise SystemExit("Please export TOGETHER_API_KEY")
     data = load_jsonl(val_file)
+    
+    # Apply skip offset
+    if skip > 0:
+        if skip >= len(data):
+            raise SystemExit(f"Skip {skip} >= data length {len(data)}")
+        data = data[skip:]
+        print(f"Skipped first {skip} examples, {len(data)} remaining")
+    
+    # Apply limit
     n = min(limit, len(data)) if limit else len(data)
     data = data[:n]
     print(f"Loaded {n} examples")
@@ -296,6 +314,7 @@ if __name__ == "__main__":
     ap.add_argument("--retries", type=int, default=5, help="transport/truncation retries")
     ap.add_argument("--base-sleep", type=float, default=1.0)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--skip", type=int, default=0, help="Skip first N examples")
     ap.add_argument("--transport", choices=["sdk","http"], default="http")
     ap.add_argument("--per-call-timeout", type=float, default=60.0)
     ap.add_argument("--warmup", type=int, default=0)
@@ -312,7 +331,7 @@ if __name__ == "__main__":
         val_file=args.val_file, model=args.model, out_path=args.out,
         concurrency=args.concurrency, temperature=args.temperature,
         max_tokens=args.max_tokens, retries=args.retries, base_sleep=args.base_sleep,
-        limit=args.limit, transport=args.transport, timeout_s=args.per_call_timeout,
+        limit=args.limit, skip=args.skip, transport=args.transport, timeout_s=args.per_call_timeout,
         warmup=args.warmup, retry_on_trunc=args.retry_on_trunc,
         growth=args.growth, max_tokens_cap=args.max_tokens_cap,
         effort=args.effort))

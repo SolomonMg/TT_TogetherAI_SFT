@@ -2,36 +2,33 @@
 """
 build_finetune_jsonl.py
 
-Simplified JSONL builder for evaluation/training/inference. Single responsibility:
-- Input: Single CSV/Parquet with text content (optionally with labels)
+Simplified JSONL builder for evaluation/training. Single responsibility:
+- Input: Single CSV/Parquet with labels + text content (already merged)
 - Output: JSONL with OpenAI chat format
 
 Usage:
-    # For training/validation (with labels)
     python build_finetune_jsonl.py \
         --input data/china_labeling_sample_all_Jul30_merged.csv \
         --output data/val_merged.jsonl
-    
-    # For inference (no labels required)
-    python build_finetune_jsonl.py \
-        --input data/unlabeled_data.csv \
-        --output data/inference.jsonl \
-        --no-labels
 
 Input file must contain:
 - meta_id: unique identifier
+- china_stance_score: float in [-1, 1] 
+- sensitive: numeric (0-1 range)
+- collective_action: numeric (0-1 range) [optional]
 - Text content in one of these column combinations:
   * subtitle + meta_desc, OR
   * transcript + description
 
-For labeled data (--label-mode, default):
-- china_stance_score: float in [-1, 1] 
-- sensitive: numeric (0-1 range)
-- collective_action: numeric (0-1 range) [optional]
-
 Output JSONL format:
-With labels: {"meta_id": "...", "messages": [system, user, assistant]}
-Without labels: {"meta_id": "...", "messages": [system, user]}
+{
+  "meta_id": "...",
+  "messages": [
+    {"role": "system", "content": "..."},
+    {"role": "user", "content": "TRANSCRIPT:...\\nDESCRIPTION:..."},
+    {"role": "assistant", "content": "{\\"china_stance_score\\":...}"}
+  ]
+}
 """
 
 import json
@@ -179,21 +176,17 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_
     write_jsonl(output_path, rows)
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert CSV/Parquet to JSONL format for training or inference")
-    parser.add_argument("--input", required=True, help="Input CSV or Parquet file with text content")
+    parser = argparse.ArgumentParser(description="Convert labeled CSV/Parquet to JSONL format")
+    parser.add_argument("--input", required=True, help="Input CSV or Parquet file with labels and text")
     parser.add_argument("--output", required=True, help="Output JSONL file")
     parser.add_argument("--yn-thresh", type=float, default=0.5, 
                        help="Threshold for converting numeric labels to yes/no (default: 0.5)")
     parser.add_argument("--min-text-len", type=int, default=10,
                        help="Minimum combined text length to include row (default: 10)")
-    parser.add_argument("--label-mode", action="store_true", default=True,
-                       help="Include gold standard labels in output (default: true)")
-    parser.add_argument("--no-labels", action="store_false", dest="label_mode",
-                       help="Skip gold standard labels for inference-only data")
     
     args = parser.parse_args()
     
-    process_file(args.input, args.output, args.yn_thresh, args.min_text_len, args.label_mode)
+    process_file(args.input, args.output, args.yn_thresh, args.min_text_len)
 
 if __name__ == "__main__":
     main()
