@@ -40,26 +40,49 @@ from json_utils import (
     write_jsonl, is_valid_text
 )
 
-SYSTEM_PROMPT = (
-    "You are a meticulous labeling assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
-    "CODEBOOK — DEFINITIONS & TASKS\n"
-    "1) china_stance_score - on a scale from -1 (very negative toward China) to +1 (very positive), score how good or bad the video makes China look.\n\n"
-    "Use the full range; 0 = neutral/unclear.\n\n"
-    "2) china_sensitive - does the video include mention or discussion of: Taiwan independence or pro-DPP; Hong Kong national-security law and political "
-    "repression; independence of Tibet/Xinjiang; repression of Tibetans/Uyghurs; June 4 Tiananmen; criticism/ridicule "
-    "of Xi Jinping or the CCP; corruption in China.\n\n"
-    "3) collective_action - Does this video encourage or portray collective action?\n\n"
-    "Do not default to the most frequent score/class; base labels on explicit evidence. Use cannot_determine only when evidence is insufficient.\n\n"
-    "SCORE THE VIDEO ON THREE DIMENSIONS:\n"
-    "1) china_stance_score — a float in [-1, 1]\n"
-    "2) china_sensitive — 'yes' | 'no' | 'cannot_determine'\n"
-    "3) collective_action — 'yes' | 'no' | 'cannot_determine'\n"
-
-    "FORMAT RULES\n"
-    "• Output ONLY a minified JSON object with keys: china_stance_score, china_sensitive, collective_action.\n"
-    "• china_stance_score must be a number in [-1, 1].\n"
-    "• Use 'cannot_determine' when unsure. Do not add extra keys or prose."
-)
+def get_system_prompt(numeric_labels: bool = False) -> str:
+    """Generate system prompt with categorical or numeric label format."""
+    
+    if numeric_labels:
+        return (
+            "You are a meticulous labeling assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
+            "CODEBOOK — DEFINITIONS & TASKS\n"
+            "1) china_stance_score - on a scale from -1 (very negative toward China) to +1 (very positive), score how good or bad the video makes China look.\n\n"
+            "Use the full range; 0 = neutral/unclear.\n\n"
+            "2) china_sensitive - on a scale from 0 (no sensitive content) to 1 (definitely includes sensitive content), score whether the video includes mention or discussion of: Taiwan independence or pro-DPP; Hong Kong national-security law and political "
+            "repression; independence of Tibet/Xinjiang; repression of Tibetans/Uyghurs; June 4 Tiananmen; criticism/ridicule "
+            "of Xi Jinping or the CCP; corruption in China. Use 0.5 when uncertain.\n\n"
+            "3) collective_action - on a scale from 0 (no collective action) to 1 (clear collective action), score whether this video encourages or portrays collective action.\n\n"
+            "Do not default to the most frequent score; base labels on explicit evidence. Use 0.5 when uncertain.\n\n"
+            "SCORE THE VIDEO ON THREE DIMENSIONS:\n"
+            "1) china_stance_score — a float in [-1, 1]\n"
+            "2) china_sensitive — a float in [0, 1]\n"
+            "3) collective_action — a float in [0, 1]\n"
+            "FORMAT RULES\n"
+            "• Output ONLY a minified JSON object with keys: china_stance_score, china_sensitive, collective_action.\n"
+            "• All values must be numbers in their specified ranges.\n"
+            "• Use the center value for uncertain cases. Do not add extra keys or prose."
+        )
+    else:
+        return (
+            "You are a meticulous labeling assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
+            "CODEBOOK — DEFINITIONS & TASKS\n"
+            "1) china_stance_score - on a scale from -1 (very negative toward China) to +1 (very positive), score how good or bad the video makes China look.\n\n"
+            "Use the full range; 0 = neutral/unclear.\n\n"
+            "2) china_sensitive - does the video include mention or discussion of: Taiwan independence or pro-DPP; Hong Kong national-security law and political "
+            "repression; independence of Tibet/Xinjiang; repression of Tibetans/Uyghurs; June 4 Tiananmen; criticism/ridicule "
+            "of Xi Jinping or the CCP; corruption in China.\n\n"
+            "3) collective_action - Does this video encourage or portray collective action?\n\n"
+            "Do not default to the most frequent score/class; base labels on explicit evidence. Use cannot_determine only when evidence is insufficient.\n\n"
+            "SCORE THE VIDEO ON THREE DIMENSIONS:\n"
+            "1) china_stance_score — a float in [-1, 1]\n"
+            "2) china_sensitive — 'yes' | 'no' | 'cannot_determine'\n"
+            "3) collective_action — 'yes' | 'no' | 'cannot_determine'\n"
+            "FORMAT RULES\n"
+            "• Output ONLY a minified JSON object with keys: china_stance_score, china_sensitive, collective_action.\n"
+            "• china_stance_score must be a number in [-1, 1].\n"
+            "• Use 'cannot_determine' when unsure. Do not add extra keys or prose."
+        )
 
 def build_user_text(transcript: str, description: str) -> str:
     """Combine transcript and description into user message format."""
@@ -79,7 +102,7 @@ def labelize_sensitive(value: float, thresh: float = 0.5) -> str:
         return "cannot_determine"
     return "yes" if float(value) >= thresh else "no"
 
-def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_text_len: int = 10, label_mode: bool = True):
+def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_text_len: int = 10, label_mode: bool = True, numeric_labels: bool = False):
     """Process single labeled file into JSONL format."""
     print(f"[info] Loading {input_path}")
     df = norm_cols(load_table(input_path))
@@ -141,7 +164,7 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_
         
         # Create messages
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": get_system_prompt(numeric_labels)},
             {"role": "user", "content": user_text}
         ]
         
@@ -190,10 +213,12 @@ def main():
                        help="Include gold standard labels in output (default: true)")
     parser.add_argument("--no-labels", action="store_false", dest="label_mode",
                        help="Skip gold standard labels for inference-only data")
+    parser.add_argument("--numeric-labels", action="store_true",
+                       help="Use numeric labels (0-1) instead of categorical (yes/no/cannot_determine)")
     
     args = parser.parse_args()
     
-    process_file(args.input, args.output, args.yn_thresh, args.min_text_len, args.label_mode)
+    process_file(args.input, args.output, args.yn_thresh, args.min_text_len, args.label_mode, args.numeric_labels)
 
 if __name__ == "__main__":
     main()
