@@ -331,7 +331,10 @@ def merge_predictions_with_csv(csv_path: str, parsed_jsonl_path: str, output_pat
     
     print(f"[info] Matched predictions for {matched}/{len(df)} rows ({matched/len(df)*100:.1f}%)")
     
-    # Write merged CSV
+    # Convert meta_id to string to preserve precision for large integers
+    df["meta_id"] = df["meta_id"].astype(str)
+    
+    # Write merged CSV with proper quoting to handle commas in text fields
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    df.to_csv(output_path, index=False)
+    df.to_csv(output_path, index=False, quoting=1, escapechar='\\')  # quoting=1 = QUOTE_ALL
     print(f"[write] {output_path}  n={len(df)} (with {matched} predictions)")

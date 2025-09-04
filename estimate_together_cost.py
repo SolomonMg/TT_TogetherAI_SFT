@@ -203,10 +203,10 @@ def main():
     # Pricing (override with your Together/GPT-OSS-120B rates)
     ap.add_argument("--train-rate-per-m", type=float, default=25.00,
                     help="Training cost $ per 1M tokens. (Set to your actual Together rate.)")
-    ap.add_argument("--infer-in-per-m", type=float, default=0.80,
+    ap.add_argument("--infer-in-per-m", type=float, default=0.15,
                     help="Inference INPUT cost $ per 1M tokens.")
-    ap.add_argument("--infer-out-per-m", type=float, default=3.20,
-                    help="Inference OUTPUT cost $ per 1M tokens.")
+    ap.add_argument("--infer-out-per-m", type=float, default=0.60,
+                    help="Inference OUTPUT cost $ per 1M tokens.") 
 
     # Inference sizing (optional) - Updated with measured values from measure_tokens.py
     ap.add_argument("--est-infer-input-toks", type=int, default=932,

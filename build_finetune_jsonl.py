@@ -40,10 +40,37 @@ from json_utils import (
     write_jsonl, is_valid_text
 )
 
-def get_system_prompt(numeric_labels: bool = False) -> str:
-    """Generate system prompt with categorical or numeric label format."""
+def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False) -> str:
+    """Generate system prompt with categorical, numeric, or comprehensive label format."""
     
-    if numeric_labels:
+    if comprehensive:
+        return (
+            "You are a meticulous content analysis assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
+            "CODEBOOK — DEFINITIONS & TASKS\n"
+            "1) china_stance_score - on a scale from -1 (very negative toward China) to +1 (very positive), score how good or bad the video makes China look. Use the full range; 0 = neutral/unclear.\n\n"
+            "2) china_sensitive - on a scale from 0 (no sensitive content) to 1 (definitely includes sensitive content), score whether the video includes mention or discussion of: Taiwan independence or pro-DPP; Hong Kong national-security law and political repression; independence of Tibet/Xinjiang; repression of Tibetans/Uyghurs; June 4 Tiananmen; criticism/ridicule of Xi Jinping or the CCP; corruption in China.\n\n"
+            "3) collective_action - on a scale from 0 (no collective action) to 1 (clear collective action), score whether this video encourages or portrays collective action.\n\n"
+            "4) inauthentic_content - on a scale from 0 (authentic content) to 1 (clearly inauthentic), score whether the video contains: misinformation or false claims; conspiracy theories or unfounded speculation; undisclosed use of AI-generated content; deepfakes or manipulated media.\n\n"
+            "5) hate_speech - on a scale from 0 (no hate speech) to 1 (clear hate speech), score whether the video contains: attacks on individuals based on race, ethnicity, religion, gender, sexual orientation, or other protected characteristics; promotion of hateful ideologies or groups; dehumanizing language toward specific communities.\n\n"
+            "6) harmful_content - on a scale from 0 (not harmful) to 1 (clearly harmful), score whether the video contains: nudity, sexual content, or sexually suggestive material; graphic violence, gore, or disturbing imagery; promotion of dangerous activities or self-harm; illegal substance use or promotion.\n\n"
+            "7) derivative_content - on a scale from 0 (original content) to 1 (clearly derivative), score whether the video is: non-original content or direct reposts; reaction videos commenting on other content; compilations or aggregations of existing material; content with minimal original contribution.\n\n"
+            "8) news_segments - on a scale from 0 (not news) to 1 (clearly news content), score whether the video contains: clips from professional news broadcasts; journalist reporting or news commentary; coverage of current events in news format; content from established news organizations.\n\n"
+            "Do not default to the most frequent score; base labels on explicit evidence. Use the midpoint of the scale when uncertain.\n\n"
+            "SCORE THE VIDEO ON EIGHT DIMENSIONS:\n"
+            "1) china_stance_score — a float in [-1, 1]\n"
+            "2) china_sensitive — a float in [0, 1]\n"
+            "3) collective_action — a float in [0, 1]\n"
+            "4) inauthentic_content — a float in [0, 1]\n"
+            "5) hate_speech — a float in [0, 1]\n"
+            "6) harmful_content — a float in [0, 1]\n"
+            "7) derivative_content — a float in [0, 1]\n"
+            "8) news_segments — a float in [0, 1]\n"
+            "FORMAT RULES\n"
+            "• Output ONLY a minified JSON object with all eight keys.\n"
+            "• All values must be numbers in their specified ranges.\n"
+            "• Use the midpoint of the scale for uncertain cases. Do not add extra keys or prose."
+        )
+    elif numeric_labels:
         return (
             "You are a meticulous labeling assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
             "CODEBOOK — DEFINITIONS & TASKS\n"
@@ -102,7 +129,7 @@ def labelize_sensitive(value: float, thresh: float = 0.5) -> str:
         return "cannot_determine"
     return "yes" if float(value) >= thresh else "no"
 
-def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_text_len: int = 10, label_mode: bool = True, numeric_labels: bool = False):
+def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_text_len: int = 10, label_mode: bool = True, numeric_labels: bool = False, comprehensive: bool = False):
     """Process single labeled file into JSONL format."""
     print(f"[info] Loading {input_path}")
     df = norm_cols(load_table(input_path))
@@ -164,7 +191,7 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_
         
         # Create messages
         messages = [
-            {"role": "system", "content": get_system_prompt(numeric_labels)},
+            {"role": "system", "content": get_system_prompt(numeric_labels, comprehensive)},
             {"role": "user", "content": user_text}
         ]
         
@@ -215,10 +242,12 @@ def main():
                        help="Skip gold standard labels for inference-only data")
     parser.add_argument("--numeric-labels", action="store_true",
                        help="Use numeric labels (0-1) instead of categorical (yes/no/cannot_determine)")
+    parser.add_argument("--comprehensive", action="store_true",
+                       help="Use comprehensive content analysis prompt with 8 dimensions including inauthentic content, hate speech, harmful content, derivative content, and news segments")
     
     args = parser.parse_args()
     
-    process_file(args.input, args.output, args.yn_thresh, args.min_text_len, args.label_mode, args.numeric_labels)
+    process_file(args.input, args.output, args.yn_thresh, args.min_text_len, args.label_mode, args.numeric_labels, args.comprehensive)
 
 if __name__ == "__main__":
     main()
