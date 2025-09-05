@@ -312,6 +312,68 @@ def try_parse_json_with_fixes(s: str):
     # Give up - couldn't fix it
     raise
 
+def standardize_json_keys(obj: dict) -> dict:
+    """Standardize JSON keys to canonical comprehensive format"""
+    if not isinstance(obj, dict):
+        return obj
+    
+    # Define canonical key mappings
+    key_mappings = {
+        'china_stance_score': ['china_stance_score', 'china_stance', 'collective_stance_score', 'harmful_stance_score'],
+        'china_sensitive': ['china_sensitive', 'collective_sensitive', 'hate_sensitivity', 'hate_sens', 'hate_senstive'],
+        'collective_action': [
+            'collective_action', 'collective', 'collective action', 'collective content', 
+            'collective or collective_action', 'collective or portrays collective action',
+            'collective,', 'collective?', 'collective_action0', 'collective_action:', 
+            'collective_action?', 'collective_action_action', 'collective_action_score',
+            'collective_action_stance_score', 'collective_content', 'collective_score'
+        ],
+        'inauthentic_content': [
+            'inauthentic_content', 'ina', 'ina0uthentic_content', 'inaction_content',
+            'inauth', 'inauth...', 'inauth0', 'inauth?', 'inauth_content', 'inauth_speech',
+            'inauthan_content', 'inauthent_content', 'inauthentic', 'inauthentic content',
+            'inauthentic or content', 'inauthentic,', 'inauthentic?', 'inauthentic_content?',
+            'inauthentic_stance_score', 'inauthful_content', 'inauthorentic_content', 'inhuman_content'
+        ],
+        'hate_speech': [
+            'hate_speech', 'hate speech', 'hate_s or speech', 'hate_s0peech', 'hate_s?',
+            'hate_scor', 'hate_sense', 'hate_senspeech', 'hate_situation', 'hate_speech,',
+            'hate_speech?', 'hate_speech_content', 'hate_speech_score', 'hateful_content',
+            'and_hate_speech'
+        ],
+        'harmful_content': [
+            'harmful_content', 'harm', 'harm?', 'harmful', 'harmful (??)', 'harmful action',
+            'harmful content', 'harmful stance_score', 'harmful0', 'harmful?', 'harmful_ content',
+            'harmful_chinese_content', 'harmful_content?', 'harmful_sensitivty', 'harmful_stance_score',
+            'harmfulfill_harmful_content', 'harmfulfilling_content', 'harmfulld_content',
+            'harmonious_content', 'china_harmful_content'
+        ],
+        'news_segments': [
+            'news_segments', 'news', 'news segments', 'news0segments', 'news_segments0'
+        ]
+    }
+    
+    # Create reverse mapping for quick lookup
+    reverse_mapping = {}
+    for canonical, variants in key_mappings.items():
+        for variant in variants:
+            reverse_mapping[variant] = canonical
+    
+    # Standardize the object
+    standardized = {}
+    for key, value in obj.items():
+        # Skip invalid/junk keys
+        if key in ['0', '0.0', '0.1', '0.4', '0.6', '1', '4', 'D'] or len(str(key)) > 100:
+            continue
+            
+        canonical_key = reverse_mapping.get(key, key)
+        
+        # Only include keys that map to our comprehensive schema
+        if canonical_key in key_mappings:
+            standardized[canonical_key] = value
+    
+    return standardized
+
 def extract_first_valid_json(text: str):
     """
     Strategy:
@@ -326,6 +388,7 @@ def extract_first_valid_json(text: str):
     # 1) Whole-string JSON (try with fixes first)
     try:
         obj = try_parse_json_with_fixes(text.strip())
+        obj = standardize_json_keys(obj)  # Standardize keys
         if valid_schema(obj):
             return obj, True, "strict"
     except Exception:
@@ -335,6 +398,7 @@ def extract_first_valid_json(text: str):
     s = _strip_code_fence(text)
     try:
         obj = try_parse_json_with_fixes(s.strip())
+        obj = standardize_json_keys(obj)  # Standardize keys
         if valid_schema(obj):
             return obj, True, "codefence_stripped"
     except Exception:
@@ -345,6 +409,7 @@ def extract_first_valid_json(text: str):
     if cand:
         try:
             obj = try_parse_json_with_fixes(cand)
+            obj = standardize_json_keys(obj)  # Standardize keys
             if valid_schema(obj):
                 return obj, True, "balanced_block"
         except Exception:
@@ -356,6 +421,7 @@ def extract_first_valid_json(text: str):
     if json_pattern:
         try:
             obj = try_parse_json_with_fixes(json_pattern.group(0))
+            obj = standardize_json_keys(obj)  # Standardize keys
             if valid_schema(obj):
                 return obj, True, "pattern_match"
         except Exception:
