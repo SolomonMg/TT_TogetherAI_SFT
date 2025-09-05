@@ -53,20 +53,18 @@ def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False)
             "4) inauthentic_content - on a scale from 0 (authentic content) to 1 (clearly inauthentic), score whether the video contains: misinformation or false claims; conspiracy theories or unfounded speculation; undisclosed use of AI-generated content; deepfakes or manipulated media.\n\n"
             "5) hate_speech - on a scale from 0 (no hate speech) to 1 (clear hate speech), score whether the video contains: attacks on individuals based on race, ethnicity, religion, gender, sexual orientation, or other protected characteristics; promotion of hateful ideologies or groups; dehumanizing language toward specific communities.\n\n"
             "6) harmful_content - on a scale from 0 (not harmful) to 1 (clearly harmful), score whether the video contains: nudity, sexual content, or sexually suggestive material; graphic violence, gore, or disturbing imagery; promotion of dangerous activities or self-harm; illegal substance use or promotion.\n\n"
-            "7) derivative_content - on a scale from 0 (original content) to 1 (clearly derivative), score whether the video is: non-original content or direct reposts; reaction videos commenting on other content; compilations or aggregations of existing material; content with minimal original contribution.\n\n"
-            "8) news_segments - on a scale from 0 (not news) to 1 (clearly news content), score whether the video contains: clips from professional news broadcasts; journalist reporting or news commentary; coverage of current events in news format; content from established news organizations.\n\n"
+            "7) news_segments - on a scale from 0 (not news) to 1 (clearly news content), score whether the video contains: clips from professional news broadcasts; journalist reporting or news commentary; coverage of current events in news format; content from established news organizations.\n\n"
             "Do not default to the most frequent score; base labels on explicit evidence. Use the midpoint of the scale when uncertain.\n\n"
-            "SCORE THE VIDEO ON EIGHT DIMENSIONS:\n"
+            "SCORE THE VIDEO ON SEVEN DIMENSIONS:\n"
             "1) china_stance_score — a float in [-1, 1]\n"
             "2) china_sensitive — a float in [0, 1]\n"
             "3) collective_action — a float in [0, 1]\n"
             "4) inauthentic_content — a float in [0, 1]\n"
             "5) hate_speech — a float in [0, 1]\n"
             "6) harmful_content — a float in [0, 1]\n"
-            "7) derivative_content — a float in [0, 1]\n"
-            "8) news_segments — a float in [0, 1]\n"
+            "7) news_segments — a float in [0, 1]\n"
             "FORMAT RULES\n"
-            "• Output ONLY a minified JSON object with all eight keys.\n"
+            "• Output ONLY a minified JSON object with all seven keys.\n"
             "• All values must be numbers in their specified ranges.\n"
             "• Use the midpoint of the scale for uncertain cases. Do not add extra keys or prose."
         )
@@ -136,12 +134,12 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_
     
     # Check for meta_id column (flexible naming)
     meta_col = None
-    for col in ["meta_id", "id"]:
+    for col in ["meta_id", "id", "tt_video_id", "yt_video_id", "video_id"]:
         if col in df.columns:
             meta_col = col
             break
     if not meta_col:
-        raise SystemExit("[error] Input file missing meta_id or id column")
+        raise SystemExit("[error] Input file missing meta_id, id, tt_video_id, yt_video_id, or video_id column")
     
     # Check for required label columns (only in label mode)
     if label_mode:

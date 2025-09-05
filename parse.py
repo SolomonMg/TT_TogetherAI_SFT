@@ -71,13 +71,23 @@ def valid_schema(y: dict) -> bool:
     if not (-1.0 <= s <= 1.0): return False
     if not valid_yn_field(y.get("china_sensitive")): return False
     
-    # Optional: collective_action (if present, must be valid)
-    if "collective_action" in y:
-        if not valid_yn_field(y.get("collective_action")): return False
+    # Optional fields that should be numeric [0,1] if present
+    optional_numeric_fields = [
+        "collective_action", "inauthentic_content", "hate_speech", 
+        "harmful_content", "news_segments"
+    ]
+    
+    for field in optional_numeric_fields:
+        if field in y:
+            if not valid_yn_field(y.get(field)):
+                return False
     
     # Optional: languages (if present, must be valid)
     if "languages" in y:
         if not ok_langs(y.get("languages")): return False
+    
+    # Ignore deprecated/unknown fields (like derivative_content) 
+    # as long as required fields are valid
     
     return True
 
@@ -126,20 +136,115 @@ def _last_balanced_json_anywhere(s: str):
             break
     return last
 
-# --- targeted sanitizer for the double-decimal bug ----------------------
+# --- enhanced sanitizers for common parsing issues ----------------------
 
-# Only fix the numeric token that follows "china_stance_score":
-_FIX_SCORE_DBLDEC_RE = re.compile(
-    r'("china_stance_score"\s*:\s*)(-?\d+\.\d+)\.0+(?=[\s,}])'
-)
+# Fix double decimals in any numeric field (e.g., 0.0.0 -> 0.0)
+_FIX_DOUBLE_DECIMAL_RE = re.compile(r'(\d+\.\d+)\.0+(?=[\s,}\]])')
 
-def _fix_china_stance_score_decimal_bug(s: str) -> str:
+# Fix malformed keys like "china_stance_score:0" -> "china_stance_score":0
+_FIX_MALFORMED_KEY_RE = re.compile(r'"([^"]+):([^"]*)"(\s*:\s*)"([^"]*)"')
+
+# Fix missing quotes on string values like "china_stance_score:0,"
+_FIX_UNQUOTED_KEY_VALUE_RE = re.compile(r'"([^"]+):([^"]*)"')
+
+# Fix truncated JSON like "collective_action": or ending with incomplete values
+_FIX_TRUNCATED_VALUE_RE = re.compile(r':\s*$|:\s*,')
+
+# Fix space-separated values (just numbers) like "0.0 0.5 0.2 0.0 0.0 0.0 0.0"
+_SPACE_SEPARATED_VALUES_RE = re.compile(r'^\s*(-?\d+(?:\.\d+)?(?:\s+-?\d+(?:\.\d+)?){6})\s*$')
+
+# Fix missing quotes in key names like harmful0 -> "harmful_content"
+_FIX_MALFORMED_KEYS_RE = re.compile(r'([,{]\s*)(harmful0|hate0|news0|inauthentic0)(\s*:)')
+
+# Fix incomplete JSON objects ending with trailing characters like {"...,
+_INCOMPLETE_JSON_RE = re.compile(r'^\{[^}]*,\s*$')
+
+def _fix_double_decimal_bug(s: str) -> str:
+    """Fix double decimals like 0.0.0 -> 0.0 and scientific notation like 0.4.0e-1 -> 0.04"""
+    # Fix scientific notation like 0.4.0e-1 -> 0.04
+    s = re.sub(r'(\d+\.\d+)\.0e-1', lambda m: str(float(m.group(1)) * 0.1), s)
+    
+    # Fix regular double decimals like 0.0.0 -> 0.0
+    s = _FIX_DOUBLE_DECIMAL_RE.sub(r'\1', s)
+    
+    return s
+
+def _fix_malformed_keys(s: str) -> str:
     """
-    Fixes cases like: "china_stance_score": -0.6.0  ->  -0.6
-    Only acts on the value after the china_stance_score key.
-    Leaves scientific notation (e.g., -8e-1) untouched.
+    Fix malformed keys like:
+    - "china_stance_score:0":"0" -> "china_stance_score":0
+    - "china_stance_score:0," -> "china_stance_score":0,
+    - "inauthentic:0," -> "inauthentic_content":0,
     """
-    return _FIX_SCORE_DBLDEC_RE.sub(r'\1\2', s)
+    # Fix specific pattern: "china_stance_score:0":"0" -> "china_stance_score":0
+    s = re.sub(r'"china_stance_score:0":"0"', '"china_stance_score":0', s)
+    
+    # Fix pattern like: "key:value" where the whole thing is in quotes
+    # This handles cases like "china_stance_score:0,"
+    s = re.sub(r'"([a-z_]+):([^"]*)"(\s*:\s*)"([^"]*)"', r'"\1":\2', s)
+    s = re.sub(r'"([a-z_]+):([^"]*)"(?=\s*[,}])', r'"\1":\2', s)
+    
+    # Fix missing key name quotes and incomplete key names
+    s = re.sub(r'"inauthentic:([^"]*)"', r'"inauthentic_content":\1', s)
+    s = re.sub(r'"hate:([^"]*)"', r'"hate_speech":\1', s)
+    s = re.sub(r'"harmful:([^"]*)"', r'"harmful_content":\1', s)
+    s = re.sub(r'"news:([^"]*)"', r'"news_segments":\1', s)
+    
+    # Fix bare key names without quotes followed by colon value
+    s = re.sub(r'([,{]\s*)inauthentic:(\d)', r'\1"inauthentic_content":\2', s)
+    s = re.sub(r'([,{]\s*)hate:(\d)', r'\1"hate_speech":\2', s)
+    s = re.sub(r'([,{]\s*)harmful:(\d)', r'\1"harmful_content":\2', s)
+    s = re.sub(r'([,{]\s*)news:(\d)', r'\1"news_segments":\2', s)
+    
+    # Fix the specific malformed pattern: "inauthentic:0,
+    s = re.sub(r'"inauthentic:0,', r'"inauthentic_content":0,', s)
+    
+    # Fix common typos in key names
+    s = re.sub(r'([,{]\s*)(harmful0)(\s*:)', r'\1"harmful_content"\3', s)
+    s = re.sub(r'([,{]\s*)(hate0)(\s*:)', r'\1"hate_speech"\3', s)
+    s = re.sub(r'([,{]\s*)(news0)(\s*:)', r'\1"news_segments"\3', s)
+    s = re.sub(r'([,{]\s*)(inauthentic0)(\s*:)', r'\1"inauthentic_content"\3', s)
+    
+    # Fix missing key names like just "china_stance" instead of "china_stance_score"
+    s = re.sub(r'"china_stance"(\s*:)', r'"china_stance_score"\1', s)
+    
+    return s
+
+def _fix_truncated_json(s: str) -> str:
+    """Fix truncated JSON by removing incomplete trailing parts and attempting to close"""
+    # Remove trailing colons with no values
+    s = _FIX_TRUNCATED_VALUE_RE.sub('', s)
+    
+    # Handle various truncation patterns
+    # 1. Ends with just a number (missing closing brace)
+    if re.match(r'^\{[^}]*\d+\s*$', s):
+        s = s.strip() + '}'
+    
+    # 2. Ends with comma (remove comma and close)
+    elif re.match(r'^\{[^}]*,\s*$', s):
+        s = s.rstrip(',').strip() + '}'
+    
+    # 3. Ends with incomplete key-value pair like "key":value (missing closing)
+    elif re.match(r'^\{[^}]*"[^"]*":\d+\.?\d*\s*$', s):
+        s = s.strip() + '}'
+    
+    return s
+
+def _convert_space_separated_to_json(s: str) -> str:
+    """Convert space-separated values like '0.0 0.5 0.2 0.0 0.0 0.0 0.0' to proper JSON"""
+    match = _SPACE_SEPARATED_VALUES_RE.match(s)
+    if match:
+        values = match.group(1).split()
+        if len(values) == 7:
+            keys = ["china_stance_score", "china_sensitive", "collective_action", 
+                   "inauthentic_content", "hate_speech", "harmful_content", "news_segments"]
+            json_pairs = [f'"{key}":{val}' for key, val in zip(keys, values)]
+            return '{' + ','.join(json_pairs) + '}'
+    return s
+
+def _fix_missing_quotes_in_strings(s: str) -> str:
+    """Fix missing quotes around '...' values"""
+    return re.sub(r'"\.\.\."|"…"', '"truncated"', s)
 
 # Optional: remove trailing commas before } or ]
 _TRAILING_COMMA_RE = re.compile(r',\s*([}\]])')
@@ -147,24 +252,64 @@ def _strip_trailing_commas(s: str) -> str:
     return _TRAILING_COMMA_RE.sub(r'\1', s)
 
 def try_parse_json_with_fixes(s: str):
-    """Attempt json.loads; if it fails, apply small safe fixes then retry."""
+    """Attempt json.loads; if it fails, apply comprehensive fixes then retry."""
+    # First, try parsing as-is
     try:
         return json.loads(s)
     except Exception:
         pass
-    s2 = _fix_china_stance_score_decimal_bug(s)
-    if s2 != s:
+    
+    # Apply fixes in order of frequency/likelihood
+    original_s = s
+    
+    # 1. Check if it's space-separated values and convert to JSON
+    s = _convert_space_separated_to_json(s)
+    if s != original_s:
         try:
-            return json.loads(s2)
+            return json.loads(s)
         except Exception:
             pass
-    s3 = _strip_trailing_commas(s2)
-    if s3 != s2:
-        try:
-            return json.loads(s3)
-        except Exception:
-            pass
-    # Give up
+    
+    # 2. Fix double decimals (most common issue)
+    s = _fix_double_decimal_bug(s)
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    
+    # 3. Fix malformed keys and values (do this early as it catches many patterns)
+    s = _fix_malformed_keys(s)
+    
+    # 3a. Also fix this specific edge case that wasn't caught above
+    s = re.sub(r'"inauthentic:0,"', r'"inauthentic_content":0,"', s)
+    
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    
+    # 4. Fix truncated JSON
+    s = _fix_truncated_json(s)
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    
+    # 5. Fix missing quotes in string values
+    s = _fix_missing_quotes_in_strings(s)
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    
+    # 6. Remove trailing commas (final cleanup)
+    s = _strip_trailing_commas(s)
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    
+    # Give up - couldn't fix it
     raise
 
 def extract_first_valid_json(text: str):
@@ -172,27 +317,47 @@ def extract_first_valid_json(text: str):
     Strategy:
     1) If whole string parses as JSON -> validate -> return
     2) Strip code fences; find LAST balanced {...} block -> try parse (+fixes) -> validate
+    3) Look for incomplete JSON at the end and try to complete it
     Returns (obj, ok:bool, mode:str)
     """
     if not isinstance(text, str) or not text:
         return {"invalid": True}, False, "none"
 
-    # 1) Whole-string JSON
+    # 1) Whole-string JSON (try with fixes first)
     try:
-        obj = json.loads(text)
+        obj = try_parse_json_with_fixes(text.strip())
         if valid_schema(obj):
             return obj, True, "strict"
     except Exception:
         pass
 
-    # 2) Tail/last balanced block, with small tolerance fixes
+    # 2) Strip code fences and try again
     s = _strip_code_fence(text)
+    try:
+        obj = try_parse_json_with_fixes(s.strip())
+        if valid_schema(obj):
+            return obj, True, "codefence_stripped"
+    except Exception:
+        pass
+
+    # 3) Find last balanced {...} block
     cand = _last_balanced_json_anywhere(s)
     if cand:
         try:
             obj = try_parse_json_with_fixes(cand)
             if valid_schema(obj):
-                return obj, True, "salvaged"
+                return obj, True, "balanced_block"
+        except Exception:
+            pass
+
+    # 4) Look for JSON-like patterns at the end of verbose output
+    # Find patterns like: ..."china_stance_score":0.6,"china_sensitive":1.0
+    json_pattern = re.search(r'\{[^{}]*"china_stance_score"[^{}]*\}(?=[^{}]*$)', text, re.DOTALL)
+    if json_pattern:
+        try:
+            obj = try_parse_json_with_fixes(json_pattern.group(0))
+            if valid_schema(obj):
+                return obj, True, "pattern_match"
         except Exception:
             pass
 

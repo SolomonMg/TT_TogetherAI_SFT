@@ -311,11 +311,17 @@ def merge_predictions_with_csv(csv_path: str, parsed_jsonl_path: str, output_pat
     
     print(f"[info] Found predictions for {len(pred_map)} examples")
     
-    # Add prediction columns
-    df["pred_china_stance_score"] = None
-    df["pred_china_sensitive"] = None
-    df["pred_collective_action"] = None
+    # Determine all prediction keys from the data
+    all_pred_keys = set()
+    for pred_json in pred_map.values():
+        all_pred_keys.update(pred_json.keys())
+    
+    # Add prediction columns dynamically based on what's in the data
+    for key in sorted(all_pred_keys):
+        df[f"pred_{key}"] = None
     df["pred_parsed"] = False
+    
+    print(f"[info] Adding prediction columns: {sorted(['pred_' + key for key in all_pred_keys])}")
     
     # Merge predictions by meta_id
     matched = 0
@@ -323,9 +329,9 @@ def merge_predictions_with_csv(csv_path: str, parsed_jsonl_path: str, output_pat
         meta_id = str(row["meta_id"])
         if meta_id in pred_map:
             pred = pred_map[meta_id]
-            df.at[idx, "pred_china_stance_score"] = pred.get("china_stance_score")
-            df.at[idx, "pred_china_sensitive"] = pred.get("china_sensitive") 
-            df.at[idx, "pred_collective_action"] = pred.get("collective_action")
+            # Dynamically set all prediction columns
+            for key in all_pred_keys:
+                df.at[idx, f"pred_{key}"] = pred.get(key)
             df.at[idx, "pred_parsed"] = True
             matched += 1
     
