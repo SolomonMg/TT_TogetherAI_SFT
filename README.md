@@ -150,7 +150,46 @@ python score.py   --val-file data/val_BAL.jsonl   --preds   out/preds_base.parse
 
 ---
 
-## Makefile (optional)
+## Comprehensive Content Analysis
+
+The pipeline supports comprehensive multi-dimensional content analysis with 7 content categories using continuous measures (0-1 scale):
+
+- **china_stance_score**: Sentiment toward China (-1 to +1)
+- **china_sensitive**: Sensitive political content (0-1)  
+- **collective_action**: Encourages collective action (0-1)
+- **inauthentic_content**: Misinformation/deepfakes (0-1)
+- **hate_speech**: Hateful content (0-1)
+- **harmful_content**: Harmful material (0-1)
+- **news_segments**: News content (0-1)
+
+### Usage
+
+```bash
+# Convert parquet/CSV to validation JSONL with comprehensive labels
+python build_finetune_jsonl.py --input data/your_dataset.parquet --output data/your_val.jsonl --comprehensive --numeric-labels --no-labels
+
+# Run inference with higher max-tokens for comprehensive analysis
+python infer.py --val-file data/your_val.jsonl --model openai/gpt-oss-120b --out out/comprehensive_preds.raw.jsonl --concurrency 4 --temperature 0 --max-tokens 800 --retries 5
+
+# Parse predictions with enhanced key standardization
+python parse.py --raw out/comprehensive_preds.raw.jsonl --out out/comprehensive_preds.parsed.jsonl --print-bad 5
+
+# Merge with original data (example with NYU dataset)
+python -c "from json_utils import merge_predictions_with_csv; import pandas as pd; df=pd.read_parquet('data/nyu_rand_china.parquet'); df.to_csv('temp.csv', index=False); merge_predictions_with_csv('temp.csv', 'out/nyu_rand_china_comprehensive_preds.parsed.jsonl', 'merged.csv'); pd.read_csv('merged.csv').to_parquet('final_output.parquet')"
+```
+
+### Output Features
+
+- Continuous measures (0-1 scale) instead of categorical labels
+- Enhanced parsing with key standardization for clean column names
+- Support for both parquet and CSV input/output formats
+- Comprehensive 7-dimension content analysis
+
+---
+
+## Simplified Makefile
+
+Available targets:
 
 You can wire the new 3-step flow like this:
 
