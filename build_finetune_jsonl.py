@@ -2,23 +2,33 @@
 """
 build_finetune_jsonl.py
 
-Simplified JSONL builder for evaluation/training. Single responsibility:
+Simplified JSONL builder for evaluation/training with support for multiple labeling modes.
+
+Key Features:
 - Input: Single CSV/Parquet with labels + text content (already merged)
 - Output: JSONL with OpenAI chat format
+- Supports 3 labeling modes: standard (3-dim), comprehensive numeric (8-dim), comprehensive categorical (10-dim)
 
-Usage:
-    python build_finetune_jsonl.py \
-        --input data/china_labeling_sample_all_Jul30_merged.csv \
-        --output data/val_merged.jsonl
+Usage Examples:
+    # Standard 3-dimension mode
+    python build_finetune_jsonl.py --input data/merged.csv --output data/val.jsonl
 
-Input file must contain:
-- meta_id: unique identifier
-- china_stance_score: float in [-1, 1] 
-- sensitive: numeric (0-1 range)
-- collective_action: numeric (0-1 range) [optional]
+    # Comprehensive numeric mode (8 dimensions, 0-1 scale)
+    python build_finetune_jsonl.py --input data/merged.csv --output data/val.jsonl --comprehensive --numeric-labels
+
+    # Comprehensive categorical mode (10 dimensions, categorical labels)
+    python build_finetune_jsonl.py --input data/merged.csv --output data/val.jsonl --comprehensive
+
+    # Inference mode (no gold labels)
+    python build_finetune_jsonl.py --input data/unlabeled.csv --output data/inference.jsonl --no-labels
+
+Input file requirements:
+- meta_id: unique identifier (or id, tt_video_id, yt_video_id, video_id)
+- china_stance_score: float in [-1, 1] (for labeled mode)
+- sensitive: numeric (0-1 range) (for labeled mode)
+- collective_action: numeric (0-1 range) [optional] (for labeled mode)
 - Text content in one of these column combinations:
-  * subtitle + meta_desc, OR
-  * transcript + description
+  * subtitle/transcript + meta_desc/description
 
 Output JSONL format:
 {
@@ -26,9 +36,14 @@ Output JSONL format:
   "messages": [
     {"role": "system", "content": "..."},
     {"role": "user", "content": "TRANSCRIPT:...\\nDESCRIPTION:..."},
-    {"role": "assistant", "content": "{\\"china_stance_score\\":...}"}
+    {"role": "assistant", "content": "{\\"china_stance_score\\":...}"}  // Only in labeled mode
   ]
 }
+
+Labeling Modes:
+1. Standard (default): 3 dimensions - china_stance_score (float), china_sensitive/collective_action (categorical)
+2. Numeric comprehensive (--comprehensive --numeric-labels): 8 dimensions, all numeric 0-1 scale
+3. Categorical comprehensive (--comprehensive): 10 dimensions with structured categorical labels
 """
 
 import json
@@ -41,7 +56,21 @@ from json_utils import (
 )
 
 def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False) -> str:
-    """Generate system prompt with categorical, numeric, or comprehensive label format."""
+    """Generate system prompt for different labeling modes.
+
+    Args:
+        numeric_labels: If True, use numeric (0-1) labels instead of categorical (yes/no/cannot_determine)
+        comprehensive: If True, use comprehensive analysis with additional content dimensions
+
+    Returns:
+        System prompt string with appropriate labeling instructions
+
+    Modes:
+        - Default (False, False): Standard 3-dimension categorical labeling
+        - (True, False): Standard 3-dimension numeric labeling
+        - (False, True): Comprehensive 10-dimension categorical labeling
+        - (True, True): Comprehensive 8-dimension numeric labeling
+    """
     
     if comprehensive:
         if numeric_labels:

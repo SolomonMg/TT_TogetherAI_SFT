@@ -61,11 +61,42 @@ python build_finetune_jsonl.py --input data/labels_bal_val.csv --output data/val
 
 **Schema (assistant JSON)**
 
+Standard 3-dimension schema:
 ```json
 {
   "china_stance_score": "float in [-1,1]",
   "china_sensitive": "yes | no | cannot_determine",
-  "collective_action": "yes | no | cannot_determine" 
+  "collective_action": "yes | no | cannot_determine"
+}
+```
+
+Comprehensive numeric schema (8 dimensions):
+```json
+{
+  "china_stance_score": "float in [-1,1]",
+  "china_sensitive": "float in [0,1]",
+  "collective_action": "float in [0,1]",
+  "inauthentic_content": "float in [0,1]",
+  "hate_speech": "float in [0,1]",
+  "harmful_content": "float in [0,1]",
+  "news_segments": "float in [0,1]",
+  "derivative_content": "float in [0,1]"
+}
+```
+
+Comprehensive categorical schema (10 dimensions):
+```json
+{
+  "china_ccp_government": "pro | anti | neutral | cannot_determine",
+  "china_people_culture": "pro | anti | neutral | cannot_determine",
+  "china_technology_development": "pro | anti | neutral | cannot_determine",
+  "china_sensitive": "yes | no | cannot_determine",
+  "collective_action": "yes | no | cannot_determine",
+  "hate_speech": "yes | no | cannot_determine",
+  "harmful_content": "yes | no | cannot_determine",
+  "news_segments": "yes | no | cannot_determine",
+  "inauthentic_content": "yes | no | cannot_determine",
+  "derivative_content": "yes | no | cannot_determine"
 }
 ```
 
@@ -152,24 +183,48 @@ python score.py   --val-file data/val_BAL.jsonl   --preds   out/preds_base.parse
 
 ## Comprehensive Content Analysis
 
-The pipeline supports comprehensive multi-dimensional content analysis with 7 content categories using continuous measures (0-1 scale):
+The pipeline supports comprehensive multi-dimensional content analysis with two modes:
+
+### Numeric Comprehensive Mode (8 dimensions, 0-1 scale)
+Use `--comprehensive --numeric-labels` for:
 
 - **china_stance_score**: Sentiment toward China (-1 to +1)
-- **china_sensitive**: Sensitive political content (0-1)  
+- **china_sensitive**: Sensitive political content (0-1)
 - **collective_action**: Encourages collective action (0-1)
 - **inauthentic_content**: Misinformation/deepfakes (0-1)
 - **hate_speech**: Hateful content (0-1)
 - **harmful_content**: Harmful material (0-1)
 - **news_segments**: News content (0-1)
+- **derivative_content**: Lack of original commentary (0-1)
+
+### Categorical Comprehensive Mode (10 dimensions)
+Use `--comprehensive` (without numeric flag) for detailed categorical analysis:
+
+**China Attitudes (3 dimensions):**
+- **china_ccp_government**: 'pro' | 'anti' | 'neutral' | 'cannot_determine'
+- **china_people_culture**: 'pro' | 'anti' | 'neutral' | 'cannot_determine'
+- **china_technology_development**: 'pro' | 'anti' | 'neutral' | 'cannot_determine'
+
+**Content Categories (7 dimensions):**
+- **china_sensitive**: 'yes' | 'no' | 'cannot_determine'
+- **collective_action**: 'yes' | 'no' | 'cannot_determine'
+- **hate_speech**: 'yes' | 'no' | 'cannot_determine'
+- **harmful_content**: 'yes' | 'no' | 'cannot_determine'
+- **news_segments**: 'yes' | 'no' | 'cannot_determine'
+- **inauthentic_content**: 'yes' | 'no' | 'cannot_determine'
+- **derivative_content**: 'yes' | 'no' | 'cannot_determine'
 
 ### Usage
 
 ```bash
-# Convert parquet/CSV to validation JSONL with comprehensive labels
-python build_finetune_jsonl.py --input data/your_dataset.parquet --output data/your_val.jsonl --comprehensive --numeric-labels --no-labels
+# Numeric comprehensive mode (8 dimensions, 0-1 scale)
+python build_finetune_jsonl.py --input data/your_dataset.parquet --output data/your_val_numeric.jsonl --comprehensive --numeric-labels --no-labels
+
+# Categorical comprehensive mode (10 dimensions, categorical values)
+python build_finetune_jsonl.py --input data/your_dataset.parquet --output data/your_val_categorical.jsonl --comprehensive --no-labels
 
 # Run inference with higher max-tokens for comprehensive analysis
-python infer.py --val-file data/your_val.jsonl --model openai/gpt-oss-120b --out out/comprehensive_preds.raw.jsonl --concurrency 4 --temperature 0 --max-tokens 800 --retries 5
+python infer.py --val-file data/your_val_numeric.jsonl --model openai/gpt-oss-120b --out out/comprehensive_preds.raw.jsonl --concurrency 4 --temperature 0 --max-tokens 800 --retries 5
 
 # Parse predictions with enhanced key standardization
 python parse.py --raw out/comprehensive_preds.raw.jsonl --out out/comprehensive_preds.parsed.jsonl --print-bad 5
@@ -180,10 +235,11 @@ python -c "from json_utils import merge_predictions_with_csv; import pandas as p
 
 ### Output Features
 
-- Continuous measures (0-1 scale) instead of categorical labels
+- **Numeric mode**: Continuous measures (0-1 scale) for 8 content dimensions
+- **Categorical mode**: Structured categorical labels for 10 analysis dimensions
 - Enhanced parsing with key standardization for clean column names
 - Support for both parquet and CSV input/output formats
-- Comprehensive 7-dimension content analysis
+- Flexible comprehensive content analysis (8 numeric or 10 categorical dimensions)
 
 ---
 
