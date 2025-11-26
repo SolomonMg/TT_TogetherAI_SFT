@@ -55,7 +55,16 @@ def load_table(path: str) -> pd.DataFrame:
     ext = os.path.splitext(path)[1].lower()
     if ext == ".parquet":
         return pd.read_parquet(path)
-    return pd.read_csv(path)
+    # Try reading CSV with different parameters to handle malformed text
+    try:
+        return pd.read_csv(path)
+    except pd.errors.ParserError:
+        # Try with different quoting and escaping parameters
+        try:
+            return pd.read_csv(path, quoting=3, escapechar='\\', on_bad_lines='skip')
+        except:
+            # Last resort: try with minimal parsing
+            return pd.read_csv(path, sep=',', quotechar='"', on_bad_lines='skip', engine='python')
 
 def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize column names to lowercase."""
@@ -163,12 +172,32 @@ def valid_yn_field(x) -> bool:
 def valid_schema(y: dict) -> bool:
     if not isinstance(y, dict):
         return False
-    
-    # Required keys: china_stance_score, china_sensitive
+
+    # Check for comprehensive categorical format (new)
+    comprehensive_categorical_keys = {
+        "china_ccp_government", "china_people_culture", "china_technology_development",
+        "china_sensitive", "collective_action", "hate_speech", "harmful_content",
+        "news_segments", "inauthentic_content", "derivative_content"
+    }
+
+    if comprehensive_categorical_keys.issubset(y.keys()):
+        # Validate comprehensive categorical format
+        allowed_stance_values = {"pro", "anti", "neutral", "cannot_determine"}
+        for key in ["china_ccp_government", "china_people_culture", "china_technology_development"]:
+            if y.get(key) not in allowed_stance_values:
+                return False
+
+        for key in ["china_sensitive", "collective_action", "hate_speech", "harmful_content",
+                   "news_segments", "inauthentic_content", "derivative_content"]:
+            if not valid_yn_field(y.get(key)):
+                return False
+        return True
+
+    # Check for traditional format (legacy)
     required_keys = {"china_stance_score", "china_sensitive"}
     if not required_keys.issubset(y.keys()):
         return False
-    
+
     try:
         s = float(y.get("china_stance_score"))
     except Exception:
@@ -177,17 +206,17 @@ def valid_schema(y: dict) -> bool:
         return False
     if not valid_yn_field(y.get("china_sensitive")):
         return False
-    
+
     # Optional: collective_action (if present, must be valid)
     if "collective_action" in y:
         if not valid_yn_field(y.get("collective_action")):
             return False
-    
+
     # Optional: languages (if present, must be valid)
     if "languages" in y:
         if not ok_langs(y.get("languages")):
             return False
-    
+
     return True
 
 # ---------- robust JSON extraction ----------

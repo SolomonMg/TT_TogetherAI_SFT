@@ -22,3 +22,5 @@ out/*
 
 # replication 
 replication
+chunks/*
+chunks_outer/*

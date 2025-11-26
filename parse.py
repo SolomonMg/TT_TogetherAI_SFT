@@ -59,36 +59,53 @@ def valid_yn_field(x) -> bool:
 
 def valid_schema(y: dict) -> bool:
     if not isinstance(y, dict): return False
-    
-    # Required keys: china_stance_score, china_sensitive
+
+    # Check for comprehensive categorical format (new)
+    comprehensive_categorical_keys = {
+        "china_ccp_government", "china_people_culture", "china_technology_development",
+        "china_sensitive", "collective_action", "hate_speech", "harmful_content",
+        "news_segments", "inauthentic_content", "derivative_content"
+    }
+
+    if comprehensive_categorical_keys.issubset(y.keys()):
+        # Validate comprehensive categorical format
+        allowed_stance_values = {"pro", "anti", "neutral", "cannot_determine"}
+        for key in ["china_ccp_government", "china_people_culture", "china_technology_development"]:
+            if y.get(key) not in allowed_stance_values:
+                return False
+
+        for key in ["china_sensitive", "collective_action", "hate_speech", "harmful_content",
+                   "news_segments", "inauthentic_content", "derivative_content"]:
+            if not valid_yn_field(y.get(key)):
+                return False
+        return True
+
+    # Check for traditional format (legacy)
     required_keys = {"china_stance_score", "china_sensitive"}
     if not required_keys.issubset(y.keys()): return False
-    
+
     try:
         s = float(y.get("china_stance_score"))
     except Exception:
         return False
     if not (-1.0 <= s <= 1.0): return False
     if not valid_yn_field(y.get("china_sensitive")): return False
-    
+
     # Optional fields that should be numeric [0,1] if present
     optional_numeric_fields = [
-        "collective_action", "inauthentic_content", "hate_speech", 
+        "collective_action", "inauthentic_content", "hate_speech",
         "harmful_content", "news_segments"
     ]
-    
+
     for field in optional_numeric_fields:
         if field in y:
             if not valid_yn_field(y.get(field)):
                 return False
-    
+
     # Optional: languages (if present, must be valid)
     if "languages" in y:
         if not ok_langs(y.get("languages")): return False
-    
-    # Ignore deprecated/unknown fields (like derivative_content) 
-    # as long as required fields are valid
-    
+
     return True
 
 # strip code fences if present
@@ -316,15 +333,15 @@ def standardize_json_keys(obj: dict) -> dict:
     """Standardize JSON keys to canonical comprehensive format"""
     if not isinstance(obj, dict):
         return obj
-    
-    # Define canonical key mappings
-    key_mappings = {
+
+    # Define canonical key mappings for legacy format
+    legacy_key_mappings = {
         'china_stance_score': ['china_stance_score', 'china_stance', 'collective_stance_score', 'harmful_stance_score'],
         'china_sensitive': ['china_sensitive', 'collective_sensitive', 'hate_sensitivity', 'hate_sens', 'hate_senstive'],
         'collective_action': [
-            'collective_action', 'collective', 'collective action', 'collective content', 
+            'collective_action', 'collective', 'collective action', 'collective content',
             'collective or collective_action', 'collective or portrays collective action',
-            'collective,', 'collective?', 'collective_action0', 'collective_action:', 
+            'collective,', 'collective?', 'collective_action0', 'collective_action:',
             'collective_action?', 'collective_action_action', 'collective_action_score',
             'collective_action_stance_score', 'collective_content', 'collective_score'
         ],
@@ -352,26 +369,36 @@ def standardize_json_keys(obj: dict) -> dict:
             'news_segments', 'news', 'news segments', 'news0segments', 'news_segments0'
         ]
     }
-    
-    # Create reverse mapping for quick lookup
+
+    # Define comprehensive categorical keys (new format)
+    comprehensive_categorical_keys = {
+        "china_ccp_government", "china_people_culture", "china_technology_development",
+        "china_sensitive", "collective_action", "hate_speech", "harmful_content",
+        "news_segments", "inauthentic_content", "derivative_content"
+    }
+
+    # Create reverse mapping for legacy keys
     reverse_mapping = {}
-    for canonical, variants in key_mappings.items():
+    for canonical, variants in legacy_key_mappings.items():
         for variant in variants:
             reverse_mapping[variant] = canonical
-    
+
     # Standardize the object
     standardized = {}
     for key, value in obj.items():
         # Skip invalid/junk keys
         if key in ['0', '0.0', '0.1', '0.4', '0.6', '1', '4', 'D'] or len(str(key)) > 100:
             continue
-            
-        canonical_key = reverse_mapping.get(key, key)
-        
-        # Only include keys that map to our comprehensive schema
-        if canonical_key in key_mappings:
-            standardized[canonical_key] = value
-    
+
+        # Check if it's a comprehensive categorical key (keep as-is)
+        if key in comprehensive_categorical_keys:
+            standardized[key] = value
+        else:
+            # Try to map legacy/variant keys
+            canonical_key = reverse_mapping.get(key, key)
+            if canonical_key in legacy_key_mappings:
+                standardized[canonical_key] = value
+
     return standardized
 
 def extract_first_valid_json(text: str):

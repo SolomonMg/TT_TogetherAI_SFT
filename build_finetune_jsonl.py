@@ -44,30 +44,99 @@ def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False)
     """Generate system prompt with categorical, numeric, or comprehensive label format."""
     
     if comprehensive:
-        return (
-            "You are a meticulous content analysis assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
-            "CODEBOOK — DEFINITIONS & TASKS\n"
-            "1) china_stance_score - on a scale from -1 (very negative toward China) to +1 (very positive), score how good or bad the video makes China look. Use the full range; 0 = neutral/unclear.\n\n"
-            "2) china_sensitive - on a scale from 0 (no sensitive content) to 1 (definitely includes sensitive content), score whether the video includes mention or discussion of: Taiwan independence or pro-DPP; Hong Kong national-security law and political repression; independence of Tibet/Xinjiang; repression of Tibetans/Uyghurs; June 4 Tiananmen; criticism/ridicule of Xi Jinping or the CCP; corruption in China.\n\n"
-            "3) collective_action - on a scale from 0 (no collective action) to 1 (clear collective action), score whether this video encourages or portrays collective action.\n\n"
-            "4) inauthentic_content - on a scale from 0 (authentic content) to 1 (clearly inauthentic), score whether the video contains: misinformation or false claims; conspiracy theories or unfounded speculation; undisclosed use of AI-generated content; deepfakes or manipulated media.\n\n"
-            "5) hate_speech - on a scale from 0 (no hate speech) to 1 (clear hate speech), score whether the video contains: attacks on individuals based on race, ethnicity, religion, gender, sexual orientation, or other protected characteristics; promotion of hateful ideologies or groups; dehumanizing language toward specific communities.\n\n"
-            "6) harmful_content - on a scale from 0 (not harmful) to 1 (clearly harmful), score whether the video contains: nudity, sexual content, or sexually suggestive material; graphic violence, gore, or disturbing imagery; promotion of dangerous activities or self-harm; illegal substance use or promotion.\n\n"
-            "7) news_segments - on a scale from 0 (not news) to 1 (clearly news content), score whether the video contains: clips from professional news broadcasts; journalist reporting or news commentary; coverage of current events in news format; content from established news organizations.\n\n"
-            "Do not default to the most frequent score; base labels on explicit evidence. Use the midpoint of the scale when uncertain.\n\n"
-            "SCORE THE VIDEO ON SEVEN DIMENSIONS:\n"
-            "1) china_stance_score — a float in [-1, 1]\n"
-            "2) china_sensitive — a float in [0, 1]\n"
-            "3) collective_action — a float in [0, 1]\n"
-            "4) inauthentic_content — a float in [0, 1]\n"
-            "5) hate_speech — a float in [0, 1]\n"
-            "6) harmful_content — a float in [0, 1]\n"
-            "7) news_segments — a float in [0, 1]\n"
-            "FORMAT RULES\n"
-            "• Output ONLY a minified JSON object with all seven keys.\n"
-            "• All values must be numbers in their specified ranges.\n"
-            "• Use the midpoint of the scale for uncertain cases. Do not add extra keys or prose."
-        )
+        if numeric_labels:
+            return (
+                "You are a meticulous content analysis assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
+                "CODEBOOK — DEFINITIONS & TASKS\n"
+                "1) china_stance_score - on a scale from -1 (very negative toward China) to +1 (very positive), score how good or bad the video makes China look. Use the full range; 0 = neutral/unclear.\n\n"
+                "2) china_sensitive - on a scale from 0 (no sensitive content) to 1 (definitely includes sensitive content), score whether the video includes mention or discussion of: Taiwan independence or pro-DPP; Hong Kong national-security law and political repression; independence of Tibet/Xinjiang; repression of Tibetans/Uyghurs; June 4 Tiananmen; criticism/ridicule of Xi Jinping or the CCP; corruption in China.\n\n"
+                "3) collective_action - on a scale from 0 (no collective action) to 1 (clear collective action), score whether this video encourages or portrays collective action.\n\n"
+                "4) inauthentic_content - on a scale from 0 (authentic content) to 1 (clearly inauthentic), score whether the video contains: misinformation or false claims; conspiracy theories or unfounded speculation; undisclosed use of AI-generated content; deepfakes or manipulated media.\n\n"
+                "5) hate_speech - on a scale from 0 (no hate speech) to 1 (clear hate speech), score whether the video contains: attacks on individuals based on race, ethnicity, religion, gender, sexual orientation, or other protected characteristics; promotion of hateful ideologies or groups; dehumanizing language toward specific communities.\n\n"
+                "6) harmful_content - on a scale from 0 (not harmful) to 1 (clearly harmful), score whether the video contains: nudity, sexual content, or sexually suggestive material; graphic violence, gore, or disturbing imagery; promotion of dangerous activities or self-harm; illegal substance use or promotion.\n\n"
+                "7) news_segments - on a scale from 0 (not news) to 1 (clearly news content), score whether the video contains: clips from professional news broadcasts; journalist reporting or news commentary; coverage of current events in news format; content from established news organizations.\n\n"
+                "8) derivative_content - on a scale from 0 (original content) to 1 (clearly derivative), score whether less than 50% of the video adds original or meaningful commentary.\n\n"
+                "Do not default to the most frequent score; base labels on explicit evidence. Use the midpoint of the scale when uncertain.\n\n"
+                "SCORE THE VIDEO ON EIGHT DIMENSIONS:\n"
+                "1) china_stance_score — a float in [-1, 1]\n"
+                "2) china_sensitive — a float in [0, 1]\n"
+                "3) collective_action — a float in [0, 1]\n"
+                "4) inauthentic_content — a float in [0, 1]\n"
+                "5) hate_speech — a float in [0, 1]\n"
+                "6) harmful_content — a float in [0, 1]\n"
+                "7) news_segments — a float in [0, 1]\n"
+                "8) derivative_content — a float in [0, 1]\n"
+                "FORMAT RULES\n"
+                "• Output ONLY a minified JSON object with all eight keys.\n"
+                "• All values must be numbers in their specified ranges.\n"
+                "• Use the midpoint of the scale for uncertain cases. Do not add extra keys or prose."
+            )
+        else:
+            return (
+                "You are a meticulous content analysis assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
+                "CODEBOOK — DEFINITIONS & TASKS\n\n"
+                "ATTITUDES TOWARD CHINA (3 DIMENSIONS)\n"
+                "Use these three separate sub-categories to distinguish the target of sentiment:\n\n"
+                "1) china_ccp_government - Label the video's stance toward the CCP/PRC Government:\n"
+                "• 'pro' - Supports or praises the CCP, PRC government, or leadership (e.g., 'China's system is more efficient than the West'). Supports PRC/CCP domestic or international policies or actions.\n"
+                "• 'anti' - Criticizes or mocks the CCP, PRC leadership, or China's political system (e.g., censorship, authoritarianism). Against PRC/CCP domestic or international policies or actions.\n"
+                "• 'neutral' - No clear evaluative stance, or mixed views.\n\n"
+                "2) china_people_culture - Label the video's stance toward Chinese People/Culture:\n"
+                "• 'pro' - Positive portrayal of Chinese citizens, traditions, or cultural achievements (e.g., cuisine, festivals, kindness of people).\n"
+                "• 'anti' - Negative generalizations or hostility toward Chinese individuals or culture (e.g., 'Chinese people are ...').\n"
+                "• 'neutral' - Cultural reference without judgment or sentiment not directed at people/culture.\n\n"
+                "3) china_technology_development - Label the video's stance toward Chinese Technology/Development:\n"
+                "• 'pro' - Praises Chinese technological progress, innovation, or infrastructure (e.g., 'China's AI development is impressive').\n"
+                "• 'anti' - Criticizes Chinese technological products, companies, or policies (e.g., 'Huawei steals IP').\n"
+                "• 'neutral' - Mentions technology or development without evaluative tone.\n\n"
+                "4) china_sensitive - Label 'yes' if the video relates to any of the following topics:\n"
+                "• Taiwan independence or pro-DPP party content\n"
+                "• Hong Kong national security law or political repression\n"
+                "• Independence movements or repression in Tibet or Xinjiang (Uyghurs)\n"
+                "• The June 4 Tiananmen Square movement\n"
+                "• Criticism, ridicule, or satire of Xi Jinping or the Chinese Communist Party (CCP)\n"
+                "• Corruption or political scandals in China\n\n"
+                "5) collective_action - Label 'yes' if the video encourages or portrays the coordinated effort of a group of people to achieve a common goal (e.g., protests, strikes, boycotts).\n\n"
+                "6) hate_speech - Label 'yes' if the content includes:\n"
+                "• Attacks on protected groups (race, gender, religion, sexual orientation, disability, etc.)\n"
+                "• Promotion of hateful ideologies or organizations (beliefs of supremacy, hateful conspiracies, or denying well-documented atrocities)\n"
+                "• Dehumanization or claims of inferiority (comparing a group to animals or objects, portraying them as inherently dangerous or criminal, or claiming they are physically or mentally inferior)\n"
+                "• Use of hateful slurs (language specifically associated with a protected attribute)\n\n"
+                "7) harmful_content - Label 'yes' if the content includes:\n"
+                "• Sensitive or mature themes (e.g., sexual activity, nudity, shocking/graphic content, animal abuse)\n"
+                "• Regulated Goods and Commercial Activities (gambling, alcohol, firearms, illegal drugs, paid political marketing, frauds and scams)\n"
+                "• Safety and Civility (promotion of violence, hate speech, violent organisations, sexual abuse, human trafficking, harrassment/bullying)\n"
+                "• Youth endangerment or exploitation (e.g. sexual content involving minors)\n"
+                "• Showing or promoting mental/behavioural health issues (e.g., suicide, self-harm, eating disorders) or dangerous activities/challenges\n"
+                "• Privacy and Security (personal information, e.g., private phone numbers and addresses)\n"
+                "Note: If labeled as hate speech, automatically also label as harmful content.\n\n"
+                "8) news_segments - Label 'yes' if more than 50% of the video consists of:\n"
+                "• Clips from TV or online news programs\n"
+                "• Anchors or reporters narrating events\n"
+                "• Overlays of news footage with captions\n\n"
+                "9) inauthentic_content - Label 'yes' if the content appears to:\n"
+                "• Contain misinformation or conspiracy theories (especially political or public concerns)\n"
+                "• Use AI-generated media without disclosure in a deceptive way\n"
+                "• Be coordinated, spammy, or manipulative\n\n"
+                "10) derivative_content - Label 'yes' if less than 50% of the video adds original or meaningful commentary. Examples:\n"
+                "• Reaction videos without commentary\n"
+                "• Reposts of other TikTok content, or content from other platforms (look for watermarks, mirrored footage, or stitched reposts)\n\n"
+                "Do not default to the most frequent label; base labels on explicit evidence. Use 'cannot_determine' when evidence is insufficient.\n\n"
+                "LABEL THE VIDEO ON TEN DIMENSIONS:\n"
+                "1) china_ccp_government — 'pro' | 'anti' | 'neutral'\n"
+                "2) china_people_culture — 'pro' | 'anti' | 'neutral'\n"
+                "3) china_technology_development — 'pro' | 'anti' | 'neutral'\n"
+                "4) china_sensitive — 'yes' | 'no' | 'cannot_determine'\n"
+                "5) collective_action — 'yes' | 'no' | 'cannot_determine'\n"
+                "6) hate_speech — 'yes' | 'no' | 'cannot_determine'\n"
+                "7) harmful_content — 'yes' | 'no' | 'cannot_determine'\n"
+                "8) news_segments — 'yes' | 'no' | 'cannot_determine'\n"
+                "9) inauthentic_content — 'yes' | 'no' | 'cannot_determine'\n"
+                "10) derivative_content — 'yes' | 'no' | 'cannot_determine'\n"
+                "FORMAT RULES\n"
+                "• Output ONLY a minified JSON object with all ten keys.\n"
+                "• Use exact values as specified above. Do not add extra keys or prose."
+            )
     elif numeric_labels:
         return (
             "You are a meticulous labeling assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
@@ -152,13 +221,22 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_
     transcript_col = None
     desc_col = None
     
-    # Try different column name variations
+    # Try different column name variations (prioritize exact matches)
     for col in df.columns:
         col_lower = col.lower()
         if "subtitle" in col_lower or "transcript" in col_lower:
             transcript_col = col
-        elif "desc" in col_lower or "description" in col_lower:
+        elif col_lower in ["meta_desc", "description", "processed_desc"]:
             desc_col = col
+            break  # Prioritize exact matches
+
+    # Fallback to any column with "desc" if no exact match found
+    if not desc_col:
+        for col in df.columns:
+            col_lower = col.lower()
+            if "desc" in col_lower:
+                desc_col = col
+                break
     
     if not transcript_col and not desc_col:
         raise SystemExit("[error] No text content columns found (need subtitle/transcript and/or meta_desc/description)")
