@@ -70,7 +70,7 @@ Standard 3-dimension schema:
 }
 ```
 
-Comprehensive numeric schema (8 dimensions):
+Comprehensive numeric schema (9 dimensions):
 ```json
 {
   "china_stance_score": "float in [-1,1]",
@@ -80,23 +80,25 @@ Comprehensive numeric schema (8 dimensions):
   "hate_speech": "float in [0,1]",
   "harmful_content": "float in [0,1]",
   "news_segments": "float in [0,1]",
-  "derivative_content": "float in [0,1]"
+  "derivative_content": "float in [0,1]",
+  "china_related": "float in [0,1]"
 }
 ```
 
-Comprehensive categorical schema (10 dimensions):
+Comprehensive categorical schema (11 dimensions):
 ```json
 {
-  "china_ccp_government": "pro | anti | neutral | cannot_determine",
-  "china_people_culture": "pro | anti | neutral | cannot_determine",
-  "china_technology_development": "pro | anti | neutral | cannot_determine",
+  "china_ccp_government": "pro | anti | neutral/unclear",
+  "china_people_culture": "pro | anti | neutral/unclear",
+  "china_technology_development": "pro | anti | neutral/unclear",
   "china_sensitive": "yes | no | cannot_determine",
   "collective_action": "yes | no | cannot_determine",
   "hate_speech": "yes | no | cannot_determine",
   "harmful_content": "yes | no | cannot_determine",
   "news_segments": "yes | no | cannot_determine",
   "inauthentic_content": "yes | no | cannot_determine",
-  "derivative_content": "yes | no | cannot_determine"
+  "derivative_content": "yes | no | cannot_determine",
+  "china_related": "yes | no"
 }
 ```
 

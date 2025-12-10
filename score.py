@@ -37,11 +37,28 @@ from json_utils import REQ_KEYS, ALLOWED_YES_NO_CD, load_jsonl, gold_of, clamp01
 
 def load_val_examples(val_path: str) -> List[dict]:
     data = load_jsonl(val_path)
-    required_keys = {"china_stance_score", "china_sensitive"}  # Minimum required keys
-    for i, ex in enumerate(data):
-        g = gold_of(ex)
-        if not required_keys.issubset(set(g.keys())):
-            raise RuntimeError(f"{val_path}: example {i} gold missing required keys {required_keys - set(g.keys())}")
+    if not data:
+        raise RuntimeError(f"{val_path}: empty file")
+    
+    # Detect format: comprehensive (11-dim) vs standard (3-dim)
+    first_gold = gold_of(data[0])
+    is_comprehensive = "china_related" in first_gold
+    
+    if is_comprehensive:
+        # Comprehensive format: check for basic required keys
+        required_keys = {"china_related", "china_sensitive"}
+        for i, ex in enumerate(data):
+            g = gold_of(ex)
+            if not required_keys.issubset(set(g.keys())):
+                raise RuntimeError(f"{val_path}: example {i} gold missing required keys {required_keys - set(g.keys())}")
+    else:
+        # Standard format: requires china_stance_score
+        required_keys = {"china_stance_score", "china_sensitive"}
+        for i, ex in enumerate(data):
+            g = gold_of(ex)
+            if not required_keys.issubset(set(g.keys())):
+                raise RuntimeError(f"{val_path}: example {i} gold missing required keys {required_keys - set(g.keys())}")
+    
     return data
 
 # gold_of now imported from json_utils
@@ -180,6 +197,103 @@ def stance_f1_negative(gold_scores: List[float], pred_scores: List[float]) -> fl
     )
     return float(f1)
 
+# ---------------- Comprehensive format scoring ----------------
+
+def score_comprehensive(
+    val: List[dict],
+    models: List[str],
+    preds_by_model: List[Dict[str, dict]],
+    yn_metric: str,
+    cd_map: Dict[str, float],
+    yn_thresh: float | None,
+) -> pd.DataFrame:
+    """Score models on comprehensive 11-dimension format.
+    
+    Metrics computed:
+    - Accuracy for china_related (yes/no binary)
+    - F1 scores for each yes/no dimension
+    - Accuracy for stance dimensions (gov, culture, tech) - 3-way classification
+    """
+    rows = []
+    
+    # Extract gold labels for all dimensions
+    gold_china_related = [yesno_to_label(gold_of(ex).get("china_related", "")) for ex in val]
+    gold_sensitive = [yesno_to_label(gold_of(ex).get("china_sensitive", "")) for ex in val]
+    gold_collective = [yesno_to_label(gold_of(ex).get("collective_action", "")) for ex in val]
+    gold_hate = [yesno_to_label(gold_of(ex).get("hate_speech", "")) for ex in val]
+    gold_harmful = [yesno_to_label(gold_of(ex).get("harmful_content", "")) for ex in val]
+    gold_news = [yesno_to_label(gold_of(ex).get("news_segments", "")) for ex in val]
+    gold_inauthentic = [yesno_to_label(gold_of(ex).get("inauthentic_content", "")) for ex in val]
+    gold_derivative = [yesno_to_label(gold_of(ex).get("derivative_content", "")) for ex in val]
+    
+    # Stance dimensions (3-way: pro/anti/neutral)
+    gold_stance_gov = [str(gold_of(ex).get("china_ccp_government", "")).strip().lower() for ex in val]
+    gold_stance_culture = [str(gold_of(ex).get("china_people_culture", "")).strip().lower() for ex in val]
+    gold_stance_tech = [str(gold_of(ex).get("china_technology_development", "")).strip().lower() for ex in val]
+    
+    for mname, mmap in zip(models, preds_by_model):
+        # Align predictions
+        pred_china_related = []
+        pred_sensitive = []
+        pred_collective = []
+        pred_hate = []
+        pred_harmful = []
+        pred_news = []
+        pred_inauthentic = []
+        pred_derivative = []
+        pred_stance_gov = []
+        pred_stance_culture = []
+        pred_stance_tech = []
+        
+        for ex in val:
+            meta_id = str(ex.get("meta_id", ""))
+            pred = mmap.get(meta_id, {})
+            
+            pred_china_related.append(yesno_to_label(pred.get("china_related", "")))
+            pred_sensitive.append(derive_label(pred, "china_sensitive_score", "china_sensitive", yn_thresh))
+            pred_collective.append(derive_label(pred, "collective_action_score", "collective_action", yn_thresh))
+            pred_hate.append(derive_label(pred, "hate_speech_score", "hate_speech", yn_thresh))
+            pred_harmful.append(derive_label(pred, "harmful_content_score", "harmful_content", yn_thresh))
+            pred_news.append(derive_label(pred, "news_segments_score", "news_segments", yn_thresh))
+            pred_inauthentic.append(derive_label(pred, "inauthentic_content_score", "inauthentic_content", yn_thresh))
+            pred_derivative.append(derive_label(pred, "derivative_content_score", "derivative_content", yn_thresh))
+            
+            pred_stance_gov.append(str(pred.get("china_ccp_government", "")).strip().lower())
+            pred_stance_culture.append(str(pred.get("china_people_culture", "")).strip().lower())
+            pred_stance_tech.append(str(pred.get("china_technology_development", "")).strip().lower())
+        
+        # Compute metrics
+        row = {"model": mname}
+        
+        # Binary accuracy for china_related
+        def accuracy(gold, pred):
+            if not gold:
+                return np.nan
+            correct = sum(1 for g, p in zip(gold, pred) if g == p and g in ["yes", "no"])
+            total = sum(1 for g in gold if g in ["yes", "no"])
+            return correct / total if total > 0 else np.nan
+        
+        row["china_related_acc"] = accuracy(gold_china_related, pred_china_related)
+        
+        # F1 scores for yes/no dimensions
+        row["sensitive_F1"] = f1_yes(gold_sensitive, pred_sensitive)
+        row["collective_F1"] = f1_yes(gold_collective, pred_collective)
+        row["hate_F1"] = f1_yes(gold_hate, pred_hate)
+        row["harmful_F1"] = f1_yes(gold_harmful, pred_harmful)
+        row["news_F1"] = f1_yes(gold_news, pred_news)
+        row["inauthentic_F1"] = f1_yes(gold_inauthentic, pred_inauthentic)
+        row["derivative_F1"] = f1_yes(gold_derivative, pred_derivative)
+        
+        # Accuracy for stance dimensions (3-way classification)
+        row["stance_gov_acc"] = accuracy(gold_stance_gov, pred_stance_gov)
+        row["stance_culture_acc"] = accuracy(gold_stance_culture, pred_stance_culture)
+        row["stance_tech_acc"] = accuracy(gold_stance_tech, pred_stance_tech)
+        
+        rows.append(row)
+    
+    df = pd.DataFrame(rows).set_index("model")
+    return df
+
 # ---------------- Core scoring ----------------
 
 def score_models(
@@ -207,6 +321,15 @@ def score_models(
             print(f"[info] Filtered out {filtered_count}/{original_count} examples with insufficient text (< {min_text_len} chars)")
         val = filtered_val
 
+    # Detect format
+    first_gold = gold_of(val[0])
+    is_comprehensive = "china_related" in first_gold
+    
+    if is_comprehensive:
+        print("[info] Detected comprehensive label format (11 dimensions)")
+    else:
+        print("[info] Detected standard label format (3 dimensions)")
+
     # Prepare per-model predictions
     models: List[str] = []
     preds_by_model: List[Dict[str, dict]] = []
@@ -224,7 +347,11 @@ def score_models(
     cd_map = parse_cd_map(cd_map_str)
     rows = []
 
-    # Gold fields
+    # For comprehensive format, we can't compute stance metrics the same way
+    if is_comprehensive:
+        return score_comprehensive(val, models, preds_by_model, yn_metric, cd_map, yn_thresh)
+    
+    # Gold fields (standard format)
     gold_stance = [clamp11(gold_of(ex)["china_stance_score"]) for ex in val]
     
     # For china_sensitive, use numeric values if they exist, otherwise convert labels
@@ -362,12 +489,16 @@ def main():
     )
 
     # Select columns that actually exist in the dataframe
-    if args.yn_metric == "f1":
+    # Check if this is comprehensive format
+    if "china_related_acc" in df.columns:
+        # Comprehensive format - show all available metrics
+        cols = [c for c in df.columns if c != "model"]
+    elif args.yn_metric == "f1":
         potential_cols = ["stance_R2","stance_pos_F1","stance_neg_F1","ch_sensitive_F","col_action_F"]
+        cols = [c for c in potential_cols if c in df.columns]
     else:
         potential_cols = ["stance_R2","stance_pos_F1","stance_neg_F1","ch_sensitive_R2","col_action_R2"]
-    
-    cols = [c for c in potential_cols if c in df.columns]
+        cols = [c for c in potential_cols if c in df.columns]
 
     print(df[cols].to_string(float_format=lambda x: f"{x:.3f}"))
 

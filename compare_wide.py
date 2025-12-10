@@ -2,19 +2,28 @@
 """
 compare_wide.py — Build a wide CSV for side-by-side model vs human comparisons.
 
-Each row = one validation example (idx).
-Columns are grouped by target:
+Supports both standard (3-dimension) and comprehensive (11-dimension) label formats.
+Auto-detects format from validation data.
 
-  stance:
-    <model1>_stance, <model2>_stance, ..., human_stance
+Standard Format Columns:
+  - stance: <model>_stance, human_stance
+  - china_sensitive: <model>_sensitive, human_sensitive
+  - collective_action: <model>_collective, human_collective
 
-  china_sensitive:
-    <model1>_sensitive, <model2>_sensitive, ..., human_sensitive
+Comprehensive Format Columns:
+  - china_related: <model>_china_related, human_china_related
+  - stance_gov: <model>_stance_gov, human_stance_gov
+  - stance_culture: <model>_stance_culture, human_stance_culture
+  - stance_tech: <model>_stance_tech, human_stance_tech
+  - china_sensitive: <model>_sensitive, human_sensitive
+  - collective_action: <model>_collective, human_collective
+  - hate_speech: <model>_hate, human_hate
+  - harmful_content: <model>_harmful, human_harmful
+  - news_segments: <model>_news, human_news
+  - inauthentic_content: <model>_inauthentic, human_inauthentic
+  - derivative_content: <model>_derivative, human_derivative
 
-  collective_action:
-    <model1>_collective, <model2>_collective, ..., human_collective
-
-The final column is: transcript
+Final column is always: transcript
 
 Input predictions must be the parsed outputs from parse.py:
   {"idx": ..., "parsed": true, "json": {...}}
@@ -24,14 +33,6 @@ Usage:
     --val-file data/val_BAL.jsonl \
     --out out/compare_wide.csv \
     out/preds_base.parsed.jsonl out/preds_ft.parsed.jsonl
-
-python compare_wide.py \
-    --val-file data/val_BAL.jsonl \
-    --out out/compare_wide.csv \
-    out/preds_llama3.1-70B.parsed.jsonl \
-    out/preds_llama3.1-70B-SFT.parsed.jsonl \
-    out/preds_llama3.3-70B.parsed.jsonl \
-    out/preds_gpt-oss-120b.parsed.jsonl
 
 """
 
@@ -49,11 +50,12 @@ from json_utils import REQ_KEYS, ALLOWED_YES_NO_CD, load_jsonl, gold_of, user_te
 
 def load_val_examples(val_path: str) -> List[dict]:
     data = load_jsonl(val_path)
-    # quick schema sanity check
+    if not data:
+        raise RuntimeError(f"{val_path}: empty file")
+    # Basic validation - just ensure we have messages
     for i, ex in enumerate(data):
-        g = gold_of(ex)
-        if set(g.keys()) != REQ_KEYS:
-            raise RuntimeError(f"{val_path}: example {i} gold keys {set(g.keys())} != {REQ_KEYS}")
+        if "messages" not in ex:
+            raise RuntimeError(f"{val_path}: example {i} missing 'messages' field")
     return data
 
 def gold_of(example: dict) -> dict:
@@ -98,6 +100,15 @@ def norm_yn_cd(x: Any) -> str:
         t = x.strip().lower()
         if t in ALLOWED_YES_NO_CD:
             return t
+    return "invalid"  # leave empty if invalid/missing
+
+def norm_stance(x: Any) -> str:
+    """Normalize stance labels (pro/anti/neutral)"""
+    if isinstance(x, str):
+        t = x.strip().lower()
+        # Accept variations
+        if t in {"pro", "anti", "neutral", "neutral/unclear"}:
+            return t
     return ""  # leave empty if invalid/missing
 
 def sanitize_model_name(path: str) -> str:
@@ -116,6 +127,15 @@ def main(val_file: str, out: str, preds: List[str]):
     val = load_val_examples(val_file)
     n = len(val)
 
+    # Detect format from first example
+    first_gold = gold_of(val[0])
+    is_comprehensive = "china_related" in first_gold
+    
+    if is_comprehensive:
+        print("[info] Detected comprehensive label format (11 dimensions)")
+    else:
+        print("[info] Detected standard label format (3 dimensions)")
+
     # load all predictions, keep model name order stable
     model_maps: List[Dict[int, dict]] = []
     model_names: List[str] = []
@@ -131,12 +151,24 @@ def main(val_file: str, out: str, preds: List[str]):
         model_names.append(base)
         model_maps.append(load_parsed_preds(p))
 
-    # Build rows
+    # Build rows based on format
+    if is_comprehensive:
+        rows, cols = build_comprehensive_rows(val, model_names, model_maps)
+    else:
+        rows, cols = build_standard_rows(val, model_names, model_maps)
+
+    df = pd.DataFrame(rows, columns=cols)
+    df.to_csv(out, index=False)
+    print(f"Wrote wide comparison CSV: {out}")
+
+def build_standard_rows(val: List[dict], model_names: List[str], model_maps: List[Dict[int, dict]]):
+    """Build rows for standard 3-dimension format"""
     rows = []
+    n = len(val)
+    
     for idx in range(n):
         ex = val[idx]
         g  = gold_of(ex)
-
         rec = {"idx": idx}
 
         # stance block: all models, then human
@@ -159,19 +191,112 @@ def main(val_file: str, out: str, preds: List[str]):
 
         # transcript last
         rec["transcript"] = user_text(ex)
-
         rows.append(rec)
 
-    # Column order: idx | stance group | sensitive group | collective group | transcript
+    # Column order
     stance_cols = [f"{m}_stance" for m in model_names] + ["human_stance"]
     sens_cols   = [f"{m}_sensitive" for m in model_names] + ["human_sensitive"]
     coll_cols   = [f"{m}_collective" for m in model_names] + ["human_collective"]
-
     cols = ["idx"] + stance_cols + sens_cols + coll_cols + ["transcript"]
+    
+    return rows, cols
 
-    df = pd.DataFrame(rows, columns=cols)
-    df.to_csv(out, index=False)
-    print(f"Wrote wide comparison CSV: {out}")
+def build_comprehensive_rows(val: List[dict], model_names: List[str], model_maps: List[Dict[int, dict]]):
+    """Build rows for comprehensive 11-dimension format"""
+    rows = []
+    n = len(val)
+    
+    for idx in range(n):
+        ex = val[idx]
+        g  = gold_of(ex)
+        rec = {"idx": idx}
+
+        # china_related (yes/no)
+        for mname, mmap in zip(model_names, model_maps):
+            pv = mmap.get(idx, {}).get("china_related")
+            rec[f"{mname}_china_related"] = norm_yn_cd(pv)
+        rec["human_china_related"] = norm_yn_cd(g.get("china_related"))
+
+        # stance dimensions (pro/anti/neutral)
+        for mname, mmap in zip(model_names, model_maps):
+            pv = mmap.get(idx, {}).get("china_ccp_government")
+            rec[f"{mname}_stance_gov"] = norm_stance(pv)
+        rec["human_stance_gov"] = norm_stance(g.get("china_ccp_government"))
+
+        for mname, mmap in zip(model_names, model_maps):
+            pv = mmap.get(idx, {}).get("china_people_culture")
+            rec[f"{mname}_stance_culture"] = norm_stance(pv)
+        rec["human_stance_culture"] = norm_stance(g.get("china_people_culture"))
+
+        for mname, mmap in zip(model_names, model_maps):
+            pv = mmap.get(idx, {}).get("china_technology_development")
+            rec[f"{mname}_stance_tech"] = norm_stance(pv)
+        rec["human_stance_tech"] = norm_stance(g.get("china_technology_development"))
+
+        # china_sensitive
+        for mname, mmap in zip(model_names, model_maps):
+            pv = mmap.get(idx, {}).get("china_sensitive")
+            rec[f"{mname}_sensitive"] = norm_yn_cd(pv)
+        rec["human_sensitive"] = norm_yn_cd(g.get("china_sensitive"))
+
+        # collective_action
+        for mname, mmap in zip(model_names, model_maps):
+            pv = mmap.get(idx, {}).get("collective_action")
+            rec[f"{mname}_collective"] = norm_yn_cd(pv)
+        rec["human_collective"] = norm_yn_cd(g.get("collective_action"))
+
+        # hate_speech
+        for mname, mmap in zip(model_names, model_maps):
+            pv = mmap.get(idx, {}).get("hate_speech")
+            rec[f"{mname}_hate"] = norm_yn_cd(pv)
+        rec["human_hate"] = norm_yn_cd(g.get("hate_speech"))
+
+        # harmful_content
+        for mname, mmap in zip(model_names, model_maps):
+            pv = mmap.get(idx, {}).get("harmful_content")
+            rec[f"{mname}_harmful"] = norm_yn_cd(pv)
+        rec["human_harmful"] = norm_yn_cd(g.get("harmful_content"))
+
+        # news_segments
+        for mname, mmap in zip(model_names, model_maps):
+            pv = mmap.get(idx, {}).get("news_segments")
+            rec[f"{mname}_news"] = norm_yn_cd(pv)
+        rec["human_news"] = norm_yn_cd(g.get("news_segments"))
+
+        # inauthentic_content
+        for mname, mmap in zip(model_names, model_maps):
+            pv = mmap.get(idx, {}).get("inauthentic_content")
+            rec[f"{mname}_inauthentic"] = norm_yn_cd(pv)
+        rec["human_inauthentic"] = norm_yn_cd(g.get("inauthentic_content"))
+
+        # derivative_content
+        for mname, mmap in zip(model_names, model_maps):
+            pv = mmap.get(idx, {}).get("derivative_content")
+            rec[f"{mname}_derivative"] = norm_yn_cd(pv)
+        rec["human_derivative"] = norm_yn_cd(g.get("derivative_content"))
+
+        # transcript last
+        rec["transcript"] = user_text(ex)
+        rows.append(rec)
+
+    # Column order: idx | all dimensions grouped | transcript
+    china_related_cols = [f"{m}_china_related" for m in model_names] + ["human_china_related"]
+    stance_gov_cols = [f"{m}_stance_gov" for m in model_names] + ["human_stance_gov"]
+    stance_culture_cols = [f"{m}_stance_culture" for m in model_names] + ["human_stance_culture"]
+    stance_tech_cols = [f"{m}_stance_tech" for m in model_names] + ["human_stance_tech"]
+    sens_cols = [f"{m}_sensitive" for m in model_names] + ["human_sensitive"]
+    coll_cols = [f"{m}_collective" for m in model_names] + ["human_collective"]
+    hate_cols = [f"{m}_hate" for m in model_names] + ["human_hate"]
+    harmful_cols = [f"{m}_harmful" for m in model_names] + ["human_harmful"]
+    news_cols = [f"{m}_news" for m in model_names] + ["human_news"]
+    inauthentic_cols = [f"{m}_inauthentic" for m in model_names] + ["human_inauthentic"]
+    derivative_cols = [f"{m}_derivative" for m in model_names] + ["human_derivative"]
+    
+    cols = (["idx"] + china_related_cols + stance_gov_cols + stance_culture_cols + 
+            stance_tech_cols + sens_cols + coll_cols + hate_cols + harmful_cols + 
+            news_cols + inauthentic_cols + derivative_cols + ["transcript"])
+    
+    return rows, cols
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
