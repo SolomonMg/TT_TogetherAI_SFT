@@ -182,7 +182,7 @@ def valid_schema(y: dict) -> bool:
 
     if comprehensive_categorical_keys.issubset(y.keys()):
         # Validate comprehensive categorical format
-        allowed_stance_values = {"pro", "anti", "neutral", "cannot_determine"}
+        allowed_stance_values = {"pro", "anti", "neutral/unclear"}
         for key in ["china_ccp_government", "china_people_culture", "china_technology_development"]:
             if y.get(key) not in allowed_stance_values:
                 return False

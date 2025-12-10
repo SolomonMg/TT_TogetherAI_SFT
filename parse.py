@@ -70,6 +70,16 @@ def valid_yn_field(x) -> bool:
     except:
         return False
 
+def valid_yes_no_only(x) -> bool:
+    """Accept yes/no labels or numeric [0,1] values (no cannot_determine)"""
+    if x in {"yes", "no"}:
+        return True
+    try:
+        f = float(x)
+        return 0.0 <= f <= 1.0
+    except:
+        return False
+
 def valid_schema(y: dict, group: GroupConfig = None, numeric_labels: bool = False) -> bool:
     """Validate schema, optionally for a specific group.
 
@@ -91,20 +101,48 @@ def valid_schema(y: dict, group: GroupConfig = None, numeric_labels: bool = Fals
     comprehensive_categorical_keys = {
         "china_ccp_government", "china_people_culture", "china_technology_development",
         "china_sensitive", "collective_action", "hate_speech", "harmful_content",
-        "news_segments", "inauthentic_content", "derivative_content"
+        "news_segments", "inauthentic_content", "derivative_content", "china_related"
     }
 
     if comprehensive_categorical_keys.issubset(y.keys()):
         # Validate comprehensive categorical format
-        allowed_stance_values = {"pro", "anti", "neutral", "cannot_determine"}
+        china_related = y.get("china_related")
+        
+        # china_related only accepts yes/no (not cannot_determine)
+        if not valid_yes_no_only(china_related):
+            return False
+        
+        # If china_related is "no", China-specific fields must be empty strings
+        # If china_related is "yes", China-specific fields must have valid values
+        allowed_stance_values = {"pro", "anti", "neutral/unclear", ""}
         for key in ["china_ccp_government", "china_people_culture", "china_technology_development"]:
-            if y.get(key) not in allowed_stance_values:
+            val = y.get(key)
+            if china_related == "no":
+                # Must be empty string when china_related is "no"
+                if val != "":
+                    return False
+            else:
+                # Must be valid stance value (not empty) when china_related is "yes"
+                if val not in {"pro", "anti", "neutral/unclear"}:
+                    return False
+        
+        # china_sensitive validation
+        china_sensitive = y.get("china_sensitive")
+        if china_related == "no":
+            # Must be empty string when china_related is "no"
+            if china_sensitive != "":
+                return False
+        else:
+            # Must be valid yes/no/cannot_determine when china_related is "yes"
+            if not valid_yn_field(china_sensitive):
                 return False
 
-        for key in ["china_sensitive", "collective_action", "hate_speech", "harmful_content",
+        # Other dimensions are always required (not conditional on china_related)
+        for key in ["collective_action", "hate_speech", "harmful_content",
                    "news_segments", "inauthentic_content", "derivative_content"]:
             if not valid_yn_field(y.get(key)):
                 return False
+        
         return True
 
     # Check for partial group match (any subset of comprehensive keys)
@@ -418,7 +456,7 @@ def standardize_json_keys(obj: dict) -> dict:
     comprehensive_categorical_keys = {
         "china_ccp_government", "china_people_culture", "china_technology_development",
         "china_sensitive", "collective_action", "hate_speech", "harmful_content",
-        "news_segments", "inauthentic_content", "derivative_content"
+        "news_segments", "inauthentic_content", "derivative_content", "china_related"
     }
 
     # Create reverse mapping for legacy keys
@@ -436,7 +474,21 @@ def standardize_json_keys(obj: dict) -> dict:
 
         # Check if it's a comprehensive categorical key (keep as-is)
         if key in comprehensive_categorical_keys:
-            standardized[key] = value
+            # Normalize stance values for the three China attitude dimensions
+            if key in ["china_ccp_government", "china_people_culture", "china_technology_development"]:
+                if isinstance(value, str):
+                    val_lower = value.lower().strip()
+                    # Map various neutral forms to canonical "neutral/unclear"
+                    if val_lower in ["neutral", "unclear", "cannot_determine", "neutral/unclear", "unclear/neutral"]:
+                        standardized[key] = "neutral/unclear"
+                    elif val_lower in ["pro", "anti"]:
+                        standardized[key] = val_lower
+                    else:
+                        standardized[key] = value  # Keep original if not recognized
+                else:
+                    standardized[key] = value
+            else:
+                standardized[key] = value
         else:
             # Try to map legacy/variant keys
             canonical_key = reverse_mapping.get(key, key)
