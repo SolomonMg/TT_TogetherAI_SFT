@@ -48,6 +48,8 @@ Labeling Modes:
 
 import json
 import argparse
+import base64
+from pathlib import Path
 
 import pandas as pd
 from json_utils import (
@@ -55,12 +57,54 @@ from json_utils import (
     write_jsonl, is_valid_text
 )
 
-def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False) -> str:
+
+# ---------------------------------------------------------------------------
+# Image helpers for vision support
+# ---------------------------------------------------------------------------
+
+def get_frame_paths(frames_dir: Path, video_id: str) -> list:
+    """Return sorted list of all frame files for a video.
+    
+    Args:
+        frames_dir: Directory containing frame folders
+        video_id: The video/aweme ID
+        
+    Returns:
+        List of Path objects for each frame, sorted by frame number
+    """
+    video_folder = frames_dir / str(video_id)
+    if not video_folder.exists():
+        return []
+    # Match frame_0.jpg, frame_1.jpg, etc.
+    frames = list(video_folder.glob("frame_*.jpg"))
+    # Sort by frame number extracted from filename
+    frames.sort(key=lambda p: int(p.stem.split("_")[1]))
+    return frames
+
+
+def encode_image_base64(image_path: Path) -> str | None:
+    """Read image and return base64-encoded data URL.
+    
+    Args:
+        image_path: Path to the image file
+        
+    Returns:
+        Base64 data URL string or None if file doesn't exist
+    """
+    if not image_path.exists():
+        return None
+    with open(image_path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False, include_images: bool = False) -> str:
     """Generate system prompt for different labeling modes.
 
     Args:
         numeric_labels: If True, use numeric (0-1) labels instead of categorical (yes/no/cannot_determine)
         comprehensive: If True, use comprehensive analysis with additional content dimensions
+        include_images: If True, add vision context to the prompt
 
     Returns:
         System prompt string with appropriate labeling instructions
@@ -72,9 +116,19 @@ def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False)
         - (True, True): Comprehensive 9-dimension numeric labeling
     """
     
+    # Vision prefix when images are included
+    vision_prefix = ""
+    if include_images:
+        vision_prefix = (
+            "You are analyzing TikTok videos using both visual and textual content. "
+            "You will be given one or more representative frames from the video (in chronological order), "
+            "along with the transcript and description. Analyze both the visual content across all frames "
+            "and the text to determine the appropriate labels.\n\n"
+        )
+    
     if comprehensive:
         if numeric_labels:
-            return (
+            return vision_prefix + (
                 "You are a meticulous content analysis assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
                 "CODEBOOK — DEFINITIONS & TASKS\n"
                 "1) china_stance_score - on a scale from -1 (very negative toward China) to +1 (very positive), score how good or bad the video makes China look. Use the full range; 0 = neutral/unclear.\n\n"
@@ -103,7 +157,7 @@ def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False)
                 "• Use the midpoint of the scale for uncertain cases. Do not add extra keys or prose."
             )
         else:
-            return (
+            return vision_prefix + (
                 "You are a meticulous content analysis assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
                 "CODEBOOK — DEFINITIONS & TASKS\n\n"
                 "1) china_related - Label 'yes' if the video is related to the politics, culture, society, or economy of China. Otherwise label 'no'.\n\n"
@@ -180,7 +234,7 @@ def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False)
                 "• Do not add extra keys or prose."
             )
     elif numeric_labels:
-        return (
+        return vision_prefix + (
             "You are a meticulous labeling assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
             "CODEBOOK — DEFINITIONS & TASKS\n"
             "1) china_stance_score - on a scale from -1 (very negative toward China) to +1 (very positive), score how good or bad the video makes China look.\n\n"
@@ -200,7 +254,7 @@ def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False)
             "• Use the center value for uncertain cases. Do not add extra keys or prose."
         )
     else:
-        return (
+        return vision_prefix + (
             "You are a meticulous labeling assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
             "CODEBOOK — DEFINITIONS & TASKS\n"
             "1) china_stance_score - on a scale from -1 (very negative toward China) to +1 (very positive), score how good or bad the video makes China look.\n\n"
@@ -232,6 +286,66 @@ def build_user_text(transcript: str, description: str) -> str:
         
     return "\n\n".join(parts)
 
+
+def build_user_content(
+    transcript: str, 
+    description: str, 
+    frames_dir: Path | None = None, 
+    video_id: str | None = None,
+    include_images: bool = False
+) -> str | list:
+    """Build user message content, optionally including images.
+    
+    Args:
+        transcript: Video transcript text
+        description: Video description text
+        frames_dir: Directory containing frame folders (required if include_images=True)
+        video_id: Video/aweme ID (required if include_images=True)
+        include_images: Whether to include images in the content
+        
+    Returns:
+        Either a plain string (text-only) or a list of content parts (multimodal)
+    """
+    # Build the text content
+    text_content = build_user_text(transcript, description)
+    
+    if not include_images or frames_dir is None or video_id is None:
+        return text_content
+    
+    # Get all frames for this video
+    frame_paths = get_frame_paths(frames_dir, video_id)
+    
+    if not frame_paths:
+        print(f"[warning] No frames found for video {video_id}, using text-only")
+        return text_content
+    
+    # Build multimodal content: images first, then text
+    content_parts = []
+    
+    for frame_path in frame_paths:
+        encoded = encode_image_base64(frame_path)
+        if encoded:
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": encoded}
+            })
+        else:
+            print(f"[warning] Failed to encode frame {frame_path}")
+    
+    # Add text content at the end
+    if text_content:
+        content_parts.append({
+            "type": "text",
+            "text": text_content
+        })
+    
+    # If no images were successfully encoded, fall back to text-only
+    if not any(p.get("type") == "image_url" for p in content_parts):
+        return text_content
+    
+    return content_parts
+
+
 def labelize_sensitive(value: float, thresh: float = 0.5) -> str:
     """Convert numeric sensitive value to label."""
     if pd.isna(value):
@@ -247,12 +361,26 @@ def process_file(
     numeric_labels: bool = False,
     comprehensive: bool = False,
     strip_meta_id: bool = False,
+    include_images: bool = False,
+    frames_dir: str | None = None,
 ):
     """Process single labeled file into JSONL format.
 
     strip_meta_id: omit meta_id column in output (Together FT rejects extra top-level keys)
+    include_images: include video frames in user messages for vision models
+    frames_dir: directory containing frame folders (required if include_images=True)
     """
+    # Validate image arguments
+    if include_images and not frames_dir:
+        raise SystemExit("[error] --frames-dir is required when --include-images is set")
+    
+    frames_path = Path(frames_dir) if frames_dir else None
+    if include_images and not frames_path.exists():
+        raise SystemExit(f"[error] Frames directory does not exist: {frames_dir}")
+    
     print(f"[info] Loading {input_path}")
+    if include_images:
+        print(f"[info] Including images from: {frames_dir}")
     df = norm_cols(load_table(input_path))
     
     # Check for meta_id column (flexible naming)
@@ -337,10 +465,18 @@ def process_file(
             filtered_count += 1
             continue
         
+        # Build user content (may include images if enabled)
+        user_content = build_user_content(
+            transcript, description,
+            frames_dir=frames_path,
+            video_id=meta_id,
+            include_images=include_images
+        )
+        
         # Create messages
         messages = [
-            {"role": "system", "content": get_system_prompt(numeric_labels, comprehensive)},
-            {"role": "user", "content": user_text}
+            {"role": "system", "content": get_system_prompt(numeric_labels, comprehensive, include_images)},
+            {"role": "user", "content": user_content}
         ]
         
         # Add assistant message with gold labels only in label mode
@@ -420,6 +556,10 @@ def main():
                        help="Use comprehensive content analysis prompt with 11 dimensions (categorical) or 9 dimensions (numeric) including china_related, inauthentic_content, hate_speech, harmful_content, derivative_content, and news_segments")
     parser.add_argument("--strip-meta-id", action="store_true",
                        help="Omit meta_id from each JSON line (Together FT requires only messages)")
+    parser.add_argument("--include-images", action="store_true",
+                       help="Include video frames in user messages for vision models")
+    parser.add_argument("--frames-dir", type=str, default=None,
+                       help="Directory containing frame folders (required if --include-images is set)")
     
     args = parser.parse_args()
     
@@ -432,6 +572,8 @@ def main():
         args.numeric_labels,
         args.comprehensive,
         args.strip_meta_id,
+        args.include_images,
+        args.frames_dir,
     )
 
 if __name__ == "__main__":
