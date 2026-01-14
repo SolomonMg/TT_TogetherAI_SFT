@@ -60,6 +60,8 @@ Group Modes (for comprehensive only):
 
 import json
 import argparse
+import base64
+from pathlib import Path
 
 import pandas as pd
 from json_utils import (
@@ -71,14 +73,56 @@ from prompt_groups import (
     GroupConfig, DIMENSIONS
 )
 
+
+# ---------------------------------------------------------------------------
+# Image helpers for vision support
+# ---------------------------------------------------------------------------
+
+def get_frame_paths(frames_dir: Path, video_id: str) -> list:
+    """Return sorted list of all frame files for a video.
+    
+    Args:
+        frames_dir: Directory containing frame folders
+        video_id: The video/aweme ID
+        
+    Returns:
+        List of Path objects for each frame, sorted by frame number
+    """
+    video_folder = frames_dir / str(video_id)
+    if not video_folder.exists():
+        return []
+    # Match frame_0.jpg, frame_1.jpg, etc.
+    frames = list(video_folder.glob("frame_*.jpg"))
+    # Sort by frame number extracted from filename
+    frames.sort(key=lambda p: int(p.stem.split("_")[1]))
+    return frames
+
+
+def encode_image_base64(image_path: Path) -> str | None:
+    """Read image and return base64-encoded data URL.
+    
+    Args:
+        image_path: Path to the image file
+        
+    Returns:
+        Base64 data URL string or None if file doesn't exist
+    """
+    if not image_path.exists():
+        return None
+    with open(image_path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
 def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False,
-                      group: GroupConfig = None) -> str:
+                      group: GroupConfig = None, include_images: bool = False) -> str:
     """Generate system prompt for different labeling modes.
 
     Args:
         numeric_labels: If True, use numeric (0-1) labels instead of categorical (yes/no/cannot_determine)
         comprehensive: If True, use comprehensive analysis with additional content dimensions
         group: Optional GroupConfig for per-group prompts (comprehensive mode only)
+        include_images: If True, add vision context to the prompt
 
     Returns:
         System prompt string with appropriate labeling instructions
@@ -91,13 +135,23 @@ def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False,
         - With group: Focused prompt for specific dimension group
     """
 
+    # Vision prefix when images are included
+    vision_prefix = ""
+    if include_images:
+        vision_prefix = (
+            "You are analyzing TikTok videos using both visual and textual content. "
+            "You will be given one or more representative frames from the video (in chronological order), "
+            "along with the transcript and description. Analyze both the visual content across all frames "
+            "and the text to determine the appropriate labels.\n\n"
+        )
+
     # If group is specified, use the group-specific prompt generator
     if group is not None:
-        return generate_group_prompt(group, numeric_labels)
-
+        return vision_prefix + generate_group_prompt(group, numeric_labels)
+    
     if comprehensive:
         if numeric_labels:
-            return (
+            return vision_prefix + (
                 "You are a meticulous content analysis assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
                 "CODEBOOK — DEFINITIONS & TASKS\n"
                 "1) china_stance_score - on a scale from -1 (very negative toward China) to +1 (very positive), score how good or bad the video makes China look. Use the full range; 0 = neutral/unclear.\n\n"
@@ -126,7 +180,7 @@ def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False,
                 "• Use the midpoint of the scale for uncertain cases. Do not add extra keys or prose."
             )
         else:
-            return (
+            return vision_prefix + (
                 "You are a meticulous content analysis assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
                 "CODEBOOK — DEFINITIONS & TASKS\n\n"
                 "1) china_related - Label 'yes' if the video is related to the politics, culture, society, or economy of China. Otherwise label 'no'.\n\n"
@@ -203,7 +257,7 @@ def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False,
                 "• Do not add extra keys or prose."
             )
     elif numeric_labels:
-        return (
+        return vision_prefix + (
             "You are a meticulous labeling assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
             "CODEBOOK — DEFINITIONS & TASKS\n"
             "1) china_stance_score - on a scale from -1 (very negative toward China) to +1 (very positive), score how good or bad the video makes China look.\n\n"
@@ -223,7 +277,7 @@ def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False,
             "• Use the center value for uncertain cases. Do not add extra keys or prose."
         )
     else:
-        return (
+        return vision_prefix + (
             "You are a meticulous labeling assistant for TikTok videos. Follow the CODEBOOK and output format exactly.\n\n"
             "CODEBOOK — DEFINITIONS & TASKS\n"
             "1) china_stance_score - on a scale from -1 (very negative toward China) to +1 (very positive), score how good or bad the video makes China look.\n\n"
@@ -255,6 +309,66 @@ def build_user_text(transcript: str, description: str) -> str:
         
     return "\n\n".join(parts)
 
+
+def build_user_content(
+    transcript: str, 
+    description: str, 
+    frames_dir: Path | None = None, 
+    video_id: str | None = None,
+    include_images: bool = False
+) -> str | list:
+    """Build user message content, optionally including images.
+    
+    Args:
+        transcript: Video transcript text
+        description: Video description text
+        frames_dir: Directory containing frame folders (required if include_images=True)
+        video_id: Video/aweme ID (required if include_images=True)
+        include_images: Whether to include images in the content
+        
+    Returns:
+        Either a plain string (text-only) or a list of content parts (multimodal)
+    """
+    # Build the text content
+    text_content = build_user_text(transcript, description)
+    
+    if not include_images or frames_dir is None or video_id is None:
+        return text_content
+    
+    # Get all frames for this video
+    frame_paths = get_frame_paths(frames_dir, video_id)
+    
+    if not frame_paths:
+        print(f"[warning] No frames found for video {video_id}, using text-only")
+        return text_content
+    
+    # Build multimodal content: images first, then text
+    content_parts = []
+    
+    for frame_path in frame_paths:
+        encoded = encode_image_base64(frame_path)
+        if encoded:
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": encoded}
+            })
+        else:
+            print(f"[warning] Failed to encode frame {frame_path}")
+    
+    # Add text content at the end
+    if text_content:
+        content_parts.append({
+            "type": "text",
+            "text": text_content
+        })
+    
+    # If no images were successfully encoded, fall back to text-only
+    if not any(p.get("type") == "image_url" for p in content_parts):
+        return text_content
+    
+    return content_parts
+
+
 def labelize_sensitive(value: float, thresh: float = 0.5) -> str:
     """Convert numeric sensitive value to label."""
     if pd.isna(value):
@@ -264,7 +378,8 @@ def labelize_sensitive(value: float, thresh: float = 0.5) -> str:
 def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
                  min_text_len: int = 10, label_mode: bool = True,
                  numeric_labels: bool = False, comprehensive: bool = False,
-                 group_mode: str = "single",strip_meta_id: bool = False):
+                 group_mode: str = "single",strip_meta_id: bool = False,
+                 include_images: bool = False, frames_dir: str | None = None):
     """Process single labeled file into JSONL format.
 
     Args:
@@ -282,8 +397,18 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
     if group_mode != "single" and not comprehensive:
         print(f"[warning] --group-mode '{group_mode}' only applies to comprehensive mode, ignoring")
         group_mode = "single"
+        
+    # Validate image arguments
+    if include_images and not frames_dir:
+        raise SystemExit("[error] --frames-dir is required when --include-images is set")
+    
+    frames_path = Path(frames_dir) if frames_dir else None
+    if include_images and not frames_path.exists():
+        raise SystemExit(f"[error] Frames directory does not exist: {frames_dir}")
 
     print(f"[info] Loading {input_path}")
+    if include_images:
+        print(f"[info] Including images from: {frames_dir}")
     df = norm_cols(load_table(input_path))
     
     # Check for meta_id column (flexible naming)
@@ -360,6 +485,39 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
     rows = []
     filtered_count = 0
 
+    def build_gold_labels(row: pd.Series) -> dict | None:
+        if comprehensive:
+            gold = {
+                "china_related": str(row.get("china_related", "")).strip(),
+                "china_ccp_government": str(row.get("stance_gov", "")).strip(),
+                "china_people_culture": str(row.get("stance_culture", "")).strip(),
+                "china_technology_development": str(row.get("stance_tech", "")).strip(),
+                "china_sensitive": str(row.get("sensitive", "")).strip(),
+                "collective_action": str(row.get("collective_action", "")).strip(),
+                "hate_speech": str(row.get("hate_speech", "")).strip(),
+                "harmful_content": str(row.get("harmful", "")).strip(),
+                "news_segments": str(row.get("news", "")).strip(),
+                "inauthentic_content": str(row.get("inauthentic", "")).strip(),
+                "derivative_content": str(row.get("derivative", "")).strip(),
+            }
+            return gold
+
+        stance = clamp11(row["china_stance_score"])
+        if pd.isna(stance):
+            return None
+
+        sensitive_label = labelize_sensitive(row["sensitive"], yn_thresh)
+        gold = {
+            "china_stance_score": float(stance),
+            "china_sensitive": sensitive_label,
+        }
+
+        if "collective_action" in df.columns and not pd.isna(row["collective_action"]):
+            collective_label = labelize_sensitive(row["collective_action"], yn_thresh)
+            gold["collective_action"] = collective_label
+
+        return gold
+
     for _, r in df.iterrows():
         meta_id = to_str_meta(r[meta_col])
         if not meta_id:
@@ -376,92 +534,73 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
             print(f"[warning] Insufficient text content for meta_id {meta_id} (< {min_text_len} chars), skipping")
             filtered_count += 1
             continue
+        # Build user content (may include images if enabled)
+        user_content = build_user_content(
+            transcript, description,
+            frames_dir=frames_path,
+            video_id=meta_id,
+            include_images=include_images
+        )
+
         # For comprehensive mode with groups, generate one entry per group
         if comprehensive and groups:
+            gold = None
+            if label_mode:
+                gold = build_gold_labels(r)
+                if gold is None:
+                    print(f"[warning] Invalid stance score for meta_id {meta_id}, skipping")
+                    filtered_count += 1
+                    continue
+
             for group_id, group in groups.items():
-                # Create messages with group-specific prompt
                 messages = [
-                    {"role": "system", "content": get_system_prompt(numeric_labels, comprehensive, group)},
-                    {"role": "user", "content": user_text}
+                    {"role": "system", "content": get_system_prompt(numeric_labels, comprehensive, group, include_images)},
+                    {"role": "user", "content": user_content}
                 ]
 
-                # Use compound ID only when multiple groups
+                if label_mode:
+                    messages.append({"role": "assistant", "content": json.dumps(gold, ensure_ascii=False, separators=(",", ":"))})
+
                 if group_mode != "single":
                     record_id = make_compound_id(meta_id, group_id)
                 else:
                     record_id = meta_id
 
-                row_data = {
-                    "meta_id": record_id,
-                    "messages": messages
-                }
+                if strip_meta_id:
+                    rows.append({"messages": messages})
+                else:
+                    row_data = {
+                        "meta_id": record_id,
+                        "messages": messages
+                    }
 
-                # Add group_id field for easier tracking
-                if group_mode != "single":
-                    row_data["group_id"] = group_id
-                    row_data["original_meta_id"] = meta_id
+                    if group_mode != "single":
+                        row_data["group_id"] = group_id
+                        row_data["original_meta_id"] = meta_id
 
-                rows.append(row_data)
+                    rows.append(row_data)
         else:
-            # Standard mode (non-comprehensive)
             messages = [
-                {"role": "system", "content": get_system_prompt(numeric_labels, comprehensive)},
-                {"role": "user", "content": user_text}
+                {"role": "system", "content": get_system_prompt(numeric_labels, comprehensive, include_images=include_images)},
+                {"role": "user", "content": user_content}
             ]
 
-            # Add assistant message with gold labels only in label mode
             if label_mode:
-                if comprehensive:
-                    # Build comprehensive gold JSON
-                    gold = {}
-                    
-                    # China-related flag (required)
-                    gold["china_related"] = str(r.get("china_related", "")).strip()
-                    
-                    # China stance dimensions (required)
-                    gold["china_ccp_government"] = str(r.get("stance_gov", "")).strip()
-                    gold["china_people_culture"] = str(r.get("stance_culture", "")).strip()
-                    gold["china_technology_development"] = str(r.get("stance_tech", "")).strip()
-                    gold["china_sensitive"] = str(r.get("sensitive", "")).strip()
-                    
-                    # Other dimensions (always present)
-                    gold["collective_action"] = str(r.get("collective_action", "")).strip()
-                    gold["hate_speech"] = str(r.get("hate_speech", "")).strip()
-                    gold["harmful_content"] = str(r.get("harmful", "")).strip()
-                    gold["news_segments"] = str(r.get("news", "")).strip()
-                    gold["inauthentic_content"] = str(r.get("inauthentic", "")).strip()
-                    gold["derivative_content"] = str(r.get("derivative", "")).strip()
-                    
-                    messages.append({"role": "assistant", "content": json.dumps(gold, ensure_ascii=False, separators=(",", ":"))})
-                else:
-                    # Build standard gold JSON
-                    stance = clamp11(r["china_stance_score"])
-                    if pd.isna(stance):
-                        print(f"[warning] Invalid stance score for meta_id {meta_id}, skipping")
-                        filtered_count += 1
-                        continue
+                gold = build_gold_labels(r)
+                if gold is None:
+                    print(f"[warning] Invalid stance score for meta_id {meta_id}, skipping")
+                    filtered_count += 1
+                    continue
 
-                    sensitive_label = labelize_sensitive(r["sensitive"], yn_thresh)
+                messages.append({"role": "assistant", "content": json.dumps(gold, ensure_ascii=False, separators=(",", ":"))})
 
-                    gold = {
-                        "china_stance_score": float(stance),
-                        "china_sensitive": sensitive_label
-                    }
-                    # Add collective_action if present
-                    if "collective_action" in df.columns and not pd.isna(r["collective_action"]):
-                        collective_label = labelize_sensitive(r["collective_action"], yn_thresh)
-                        gold["collective_action"] = collective_label
-                    
-                    messages.append({"role": "assistant", "content": json.dumps(gold, ensure_ascii=False, separators=(",", ":"))})
-            
-        
-        if strip_meta_id:
-            rows.append({"messages": messages})
-        else:
-            rows.append({
-                "meta_id": meta_id,
-                "messages": messages
-            })
+            if strip_meta_id:
+                rows.append({"messages": messages})
+            else:
+                rows.append({
+                    "meta_id": meta_id,
+                    "messages": messages
+                })
 
     # Calculate summary stats
     source_records = len(df) - filtered_count
@@ -496,6 +635,10 @@ def main():
                             "per-item: Each dimension as its own prompt.")
     parser.add_argument("--strip-meta-id", action="store_true",
                        help="Omit meta_id from each JSON line (Together FT requires only messages)")
+    parser.add_argument("--include-images", action="store_true",
+                       help="Include video frames in user messages for vision models")
+    parser.add_argument("--frames-dir", type=str, default=None,
+                       help="Directory containing frame folders (required if --include-images is set)")
     
     args = parser.parse_args()
     
@@ -508,7 +651,9 @@ def main():
         args.numeric_labels,
         args.comprehensive,
         args.group_mode,
-        args.strip_meta_id
+        args.strip_meta_id,
+        args.include_images,
+        args.frames_dir,
     )
 
 if __name__ == "__main__":

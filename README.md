@@ -245,6 +245,67 @@ python -c "from json_utils import merge_predictions_with_csv; import pandas as p
 
 ---
 
+## Vision Support (Multimodal Analysis)
+
+The pipeline supports including video frames for multimodal analysis using vision-capable models. This enables the model to analyze both visual content and text (transcript/description) together.
+
+### Quick Start
+
+```bash
+# Build JSONL with images
+python build_finetune_jsonl.py \
+    --input data/videos.csv \
+    --output data/train_with_images.jsonl \
+    --include-images \
+    --frames-dir ./frames \
+    --comprehensive
+
+# Run inference with images
+python infer.py \
+    --val-file data/train_with_images.jsonl \
+    --model meta-llama/Llama-4-Scout-17B-16E-Instruct \
+    --out out/vision_preds.raw.jsonl \
+    --include-images \
+    --frames-dir ./frames \
+    --concurrency 4 \
+    --temperature 0 \
+    --max-tokens 800
+```
+
+### Frame Directory Structure
+
+```
+frames/
+├── <video_id_1>/
+│   ├── frame_0.jpg
+│   ├── frame_1.jpg
+│   └── ...
+├── <video_id_2>/
+│   └── frame_0.jpg
+└── ...
+```
+
+### Supported Vision Models
+
+- `meta-llama/Llama-4-Scout-17B-16E-Instruct` (recommended)
+- `meta-llama/Llama-4-Maverick-17B-128E-Instruct`
+- `Qwen/Qwen2.5-VL-72B-Instruct`
+
+### New Arguments
+
+| Script | Argument | Description |
+|--------|----------|-------------|
+| `build_finetune_jsonl.py` | `--include-images` | Enable image inclusion |
+| `build_finetune_jsonl.py` | `--frames-dir` | Path to frames directory |
+| `infer.py` | `--include-images` | Enable image inclusion |
+| `infer.py` | `--frames-dir` | Path to frames directory |
+
+**Note:** Without `--include-images`, behavior is identical to the text-only version (fully backwards compatible).
+
+For detailed documentation, see [VISION_SUPPORT.md](VISION_SUPPORT.md).
+
+---
+
 ## Simplified Makefile
 
 Available targets:
