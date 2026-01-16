@@ -40,7 +40,6 @@ python infer.py \
 
 #!/usr/bin/env python3
 import os, sys, json, re, time, argparse, asyncio, logging
-import base64
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 
@@ -50,29 +49,7 @@ from together import Together
 TOGETHER_CHAT_URL = "https://api.together.xyz/v1/chat/completions"
 
 from json_utils import load_jsonl
-
-
-# ---------------------------------------------------------------------------
-# Image helpers for vision support
-# ---------------------------------------------------------------------------
-
-def get_frame_paths(frames_dir: Path, video_id: str) -> list:
-    """Return sorted list of all frame files for a video."""
-    video_folder = frames_dir / str(video_id)
-    if not video_folder.exists():
-        return []
-    frames = list(video_folder.glob("frame_*.jpg"))
-    frames.sort(key=lambda p: int(p.stem.split("_")[1]))
-    return frames
-
-
-def encode_image_base64(image_path: Path) -> str | None:
-    """Read image and return base64-encoded data URL."""
-    if not image_path.exists():
-        return None
-    with open(image_path, "rb") as f:
-        encoded = base64.b64encode(f.read()).decode("utf-8")
-    return f"data:image/jpeg;base64,{encoded}"
+from image_helpers import get_frame_paths, encode_image_base64
 
 
 def prompt_messages(
