@@ -19,7 +19,7 @@ train: ## Launch SFT job
 eval-base: ## Evaluate base model
 	python infer.py --val-file data/val_BAL.jsonl --model openai/gpt-oss-120b --out out/preds_base.raw.jsonl --concurrency 4 --temperature 0 --max-tokens 128 --retries 5
 	python parse.py --raw out/preds_base.raw.jsonl --out out/preds_base.parsed.jsonl --print-bad 5
-	python score.py --val-file data/val_BAL.jsonl --pred-file out/preds_base.parsed.jsonl --stance-thresh 0.3 --dump-csv out/base_preds.csv
+	python score.py --val-file data/val_BAL.jsonl --stance-thresh 0.3 --out out/base_preds.csv out/preds_base.parsed.jsonl
 
 # NYU Rand China dataset
 nyu-rand-china: ## Run complete NYU rand China comprehensive analysis

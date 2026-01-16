@@ -70,7 +70,7 @@ Standard 3-dimension schema:
 }
 ```
 
-Comprehensive numeric schema (8 dimensions):
+Comprehensive numeric schema (9 dimensions):
 ```json
 {
   "china_stance_score": "float in [-1,1]",
@@ -80,23 +80,25 @@ Comprehensive numeric schema (8 dimensions):
   "hate_speech": "float in [0,1]",
   "harmful_content": "float in [0,1]",
   "news_segments": "float in [0,1]",
-  "derivative_content": "float in [0,1]"
+  "derivative_content": "float in [0,1]",
+  "china_related": "float in [0,1]"
 }
 ```
 
-Comprehensive categorical schema (10 dimensions):
+Comprehensive categorical schema (11 dimensions):
 ```json
 {
-  "china_ccp_government": "pro | anti | neutral | cannot_determine",
-  "china_people_culture": "pro | anti | neutral | cannot_determine",
-  "china_technology_development": "pro | anti | neutral | cannot_determine",
+  "china_ccp_government": "pro | anti | neutral/unclear",
+  "china_people_culture": "pro | anti | neutral/unclear",
+  "china_technology_development": "pro | anti | neutral/unclear",
   "china_sensitive": "yes | no | cannot_determine",
   "collective_action": "yes | no | cannot_determine",
   "hate_speech": "yes | no | cannot_determine",
   "harmful_content": "yes | no | cannot_determine",
   "news_segments": "yes | no | cannot_determine",
   "inauthentic_content": "yes | no | cannot_determine",
-  "derivative_content": "yes | no | cannot_determine"
+  "derivative_content": "yes | no | cannot_determine",
+  "china_related": "yes | no"
 }
 ```
 
@@ -240,6 +242,67 @@ python -c "from json_utils import merge_predictions_with_csv; import pandas as p
 - Enhanced parsing with key standardization for clean column names
 - Support for both parquet and CSV input/output formats
 - Flexible comprehensive content analysis (8 numeric or 10 categorical dimensions)
+
+---
+
+## Vision Support (Multimodal Analysis)
+
+The pipeline supports including video frames for multimodal analysis using vision-capable models. This enables the model to analyze both visual content and text (transcript/description) together.
+
+### Quick Start
+
+```bash
+# Build JSONL with images
+python build_finetune_jsonl.py \
+    --input data/videos.csv \
+    --output data/train_with_images.jsonl \
+    --include-images \
+    --frames-dir ./frames \
+    --comprehensive
+
+# Run inference with images
+python infer.py \
+    --val-file data/train_with_images.jsonl \
+    --model meta-llama/Llama-4-Scout-17B-16E-Instruct \
+    --out out/vision_preds.raw.jsonl \
+    --include-images \
+    --frames-dir ./frames \
+    --concurrency 4 \
+    --temperature 0 \
+    --max-tokens 800
+```
+
+### Frame Directory Structure
+
+```
+frames/
+├── <video_id_1>/
+│   ├── frame_0.jpg
+│   ├── frame_1.jpg
+│   └── ...
+├── <video_id_2>/
+│   └── frame_0.jpg
+└── ...
+```
+
+### Supported Vision Models
+
+- `meta-llama/Llama-4-Scout-17B-16E-Instruct` (recommended)
+- `meta-llama/Llama-4-Maverick-17B-128E-Instruct`
+- `Qwen/Qwen2.5-VL-72B-Instruct`
+
+### New Arguments
+
+| Script | Argument | Description |
+|--------|----------|-------------|
+| `build_finetune_jsonl.py` | `--include-images` | Enable image inclusion |
+| `build_finetune_jsonl.py` | `--frames-dir` | Path to frames directory |
+| `infer.py` | `--include-images` | Enable image inclusion |
+| `infer.py` | `--frames-dir` | Path to frames directory |
+
+**Note:** Without `--include-images`, behavior is identical to the text-only version (fully backwards compatible).
+
+For detailed documentation, see [VISION_SUPPORT.md](VISION_SUPPORT.md).
 
 ---
 
