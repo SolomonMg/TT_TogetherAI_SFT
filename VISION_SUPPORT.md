@@ -74,8 +74,6 @@ python infer.py \
     --val-file data/inference_with_images.jsonl \
     --model meta-llama/Llama-4-Scout-17B-16E-Instruct \
     --out out/vision_preds.raw.jsonl \
-    --include-images \
-    --frames-dir ./frames \
     --concurrency 4 \
     --temperature 0 \
     --max-tokens 512
@@ -85,8 +83,6 @@ python infer.py \
     --val-file data/inference_with_images.jsonl \
     --model meta-llama/Llama-4-Scout-17B-16E-Instruct \
     --out out/vision_preds.raw.jsonl \
-    --include-images \
-    --frames-dir ./frames \
     --concurrency 4 \
     --temperature 0 \
     --max-tokens 512 \
@@ -101,13 +97,6 @@ python infer.py \
 | Argument | Type | Description |
 |----------|------|-------------|
 | `--include-images` | flag | Enable image inclusion in training data |
-| `--frames-dir` | path | Directory containing frame folders (required if `--include-images` is set) |
-
-### `infer.py`
-
-| Argument | Type | Description |
-|----------|------|-------------|
-| `--include-images` | flag | Enable image inclusion in inference |
 | `--frames-dir` | path | Directory containing frame folders (required if `--include-images` is set) |
 
 ## Message Format

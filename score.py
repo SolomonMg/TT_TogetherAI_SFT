@@ -273,10 +273,33 @@ def score_comprehensive(
             total = sum(1 for g in gold if g in ["yes", "no"])
             return correct / total if total > 0 else np.nan
         
+        # Stance accuracy for 3-way classification
+        def stance_accuracy(gold, pred):
+            if not gold:
+                return np.nan
+            # Valid stance values, plus handling for when china_related="no"
+            valid_stance = {"pro", "anti", "neutral/unclear"}
+            # Normalize empty values - treat "nan", "NaN", "", etc. as the same
+            def normalize(val):
+                v = str(val).strip().lower()
+                if v in {"nan", ""}:
+                    return "n/a"  # Use a consistent marker for N/A
+                return v
+            
+            gold_norm = [normalize(g) for g in gold]
+            pred_norm = [normalize(p) for p in pred]
+            
+            correct = sum(1 for g, p in zip(gold_norm, pred_norm) 
+                         if g == p and (g in valid_stance or g == "n/a"))
+            total = sum(1 for g in gold_norm if g in valid_stance or g == "n/a")
+            return correct / total if total > 0 else np.nan
+        
         row["china_related_acc"] = accuracy(gold_china_related, pred_china_related)
         
         # F1 scores for yes/no dimensions
+        # china_sensitive should exclude N/A (when china_related="no")
         row["sensitive_F1"] = f1_yes(gold_sensitive, pred_sensitive)
+        # General content dimensions apply to all videos
         row["collective_F1"] = f1_yes(gold_collective, pred_collective)
         row["hate_F1"] = f1_yes(gold_hate, pred_hate)
         row["harmful_F1"] = f1_yes(gold_harmful, pred_harmful)
@@ -285,9 +308,9 @@ def score_comprehensive(
         row["derivative_F1"] = f1_yes(gold_derivative, pred_derivative)
         
         # Accuracy for stance dimensions (3-way classification)
-        row["stance_gov_acc"] = accuracy(gold_stance_gov, pred_stance_gov)
-        row["stance_culture_acc"] = accuracy(gold_stance_culture, pred_stance_culture)
-        row["stance_tech_acc"] = accuracy(gold_stance_tech, pred_stance_tech)
+        row["stance_gov_acc"] = stance_accuracy(gold_stance_gov, pred_stance_gov)
+        row["stance_culture_acc"] = stance_accuracy(gold_stance_culture, pred_stance_culture)
+        row["stance_tech_acc"] = stance_accuracy(gold_stance_tech, pred_stance_tech)
         
         rows.append(row)
     

@@ -112,30 +112,19 @@ def valid_schema(y: dict, group: GroupConfig = None, numeric_labels: bool = Fals
         if not valid_yes_no_only(china_related):
             return False
         
-        # If china_related is "no", China-specific fields must be empty strings
-        # If china_related is "yes", China-specific fields must have valid values
-        allowed_stance_values = {"pro", "anti", "neutral/unclear", ""}
+        # China stance dimensions must always be valid stance values
+        # (The post-processing will convert to empty strings when china_related='no')
+        allowed_stance_values = {"pro", "anti", "neutral/unclear"}
         for key in ["china_ccp_government", "china_people_culture", "china_technology_development"]:
             val = y.get(key)
-            if china_related == "no":
-                # Must be empty string when china_related is "no"
-                if val != "":
-                    return False
-            else:
-                # Must be valid stance value (not empty) when china_related is "yes"
-                if val not in {"pro", "anti", "neutral/unclear"}:
-                    return False
+            if val not in allowed_stance_values:
+                return False
         
-        # china_sensitive validation
+        # china_sensitive validation - must always be valid yes/no/cannot_determine
+        # (The post-processing will convert to empty string when china_related='no')
         china_sensitive = y.get("china_sensitive")
-        if china_related == "no":
-            # Must be empty string when china_related is "no"
-            if china_sensitive != "":
-                return False
-        else:
-            # Must be valid yes/no/cannot_determine when china_related is "yes"
-            if not valid_yn_field(china_sensitive):
-                return False
+        if not valid_yn_field(china_sensitive):
+            return False
 
         # Other dimensions are always required (not conditional on china_related)
         for key in ["collective_action", "hate_speech", "harmful_content",
@@ -497,6 +486,43 @@ def standardize_json_keys(obj: dict) -> dict:
 
     return standardized
 
+def apply_china_related_logic(obj: dict) -> dict:
+    """Post-process parsed JSON to apply conditional logic for china_related.
+    
+    When china_related='no', convert China-specific fields to empty strings:
+    - china_ccp_government
+    - china_people_culture
+    - china_technology_development
+    - china_sensitive
+    
+    This moves the conditional logic from the model prompt to the parsing stage,
+    simplifying the prompt and improving model adherence to the output schema.
+    """
+    if not isinstance(obj, dict):
+        return obj
+    
+    # Check if this is comprehensive categorical format
+    comprehensive_categorical_keys = {
+        "china_ccp_government", "china_people_culture", "china_technology_development",
+        "china_sensitive", "collective_action", "hate_speech", "harmful_content",
+        "news_segments", "inauthentic_content", "derivative_content", "china_related"
+    }
+    
+    if not comprehensive_categorical_keys.issubset(obj.keys()):
+        # Not comprehensive format, return as-is
+        return obj
+    
+    # Apply conditional logic
+    china_related = obj.get("china_related")
+    if china_related == "no":
+        # Convert China-specific fields to empty strings
+        obj["china_ccp_government"] = ""
+        obj["china_people_culture"] = ""
+        obj["china_technology_development"] = ""
+        obj["china_sensitive"] = ""
+    
+    return obj
+
 def extract_first_valid_json(text: str, group: GroupConfig = None, numeric_labels: bool = False):
     """
     Strategy:
@@ -518,6 +544,7 @@ def extract_first_valid_json(text: str, group: GroupConfig = None, numeric_label
         obj = try_parse_json_with_fixes(text.strip())
         obj = standardize_json_keys(obj)  # Standardize keys
         if valid_schema(obj, group, numeric_labels):
+            obj = apply_china_related_logic(obj)  # Apply conditional logic
             return obj, True, "strict"
     except Exception:
         pass
@@ -528,6 +555,7 @@ def extract_first_valid_json(text: str, group: GroupConfig = None, numeric_label
         obj = try_parse_json_with_fixes(s.strip())
         obj = standardize_json_keys(obj)  # Standardize keys
         if valid_schema(obj, group, numeric_labels):
+            obj = apply_china_related_logic(obj)  # Apply conditional logic
             return obj, True, "codefence_stripped"
     except Exception:
         pass
@@ -539,6 +567,7 @@ def extract_first_valid_json(text: str, group: GroupConfig = None, numeric_label
             obj = try_parse_json_with_fixes(cand)
             obj = standardize_json_keys(obj)  # Standardize keys
             if valid_schema(obj, group, numeric_labels):
+                obj = apply_china_related_logic(obj)  # Apply conditional logic
                 return obj, True, "balanced_block"
         except Exception:
             pass
@@ -557,6 +586,7 @@ def extract_first_valid_json(text: str, group: GroupConfig = None, numeric_label
                 obj = try_parse_json_with_fixes(json_pattern.group(0))
                 obj = standardize_json_keys(obj)  # Standardize keys
                 if valid_schema(obj, group, numeric_labels):
+                    obj = apply_china_related_logic(obj)  # Apply conditional logic
                     return obj, True, "pattern_match"
             except Exception:
                 pass
