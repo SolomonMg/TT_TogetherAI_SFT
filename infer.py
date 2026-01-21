@@ -49,20 +49,14 @@ from together import Together
 TOGETHER_CHAT_URL = "https://api.together.xyz/v1/chat/completions"
 
 from json_utils import load_jsonl
-from image_helpers import get_frame_paths, encode_image_base64
 
 
-def prompt_messages(
-    example: dict, 
-    frames_dir: Path | None = None, 
-    include_images: bool = False
-) -> List[Dict]:
-    """Build prompt messages, optionally adding images.
+def prompt_messages(example: dict) -> List[Dict]:
+    """Build prompt messages from example.
     
     Args:
-        example: The example dict containing messages and meta_id
-        frames_dir: Directory containing frame folders
-        include_images: Whether to include images in user messages
+        example: The example dict containing messages and meta_id.
+                 Images should already be pre-encoded in the JSONL if needed.
         
     Returns:
         List of message dicts ready for the API
@@ -76,48 +70,6 @@ def prompt_messages(
     else:
         # Inference data - use all messages as-is
         msgs = [{"role": m["role"], "content": m["content"]} for m in messages]
-    
-    # If images are enabled, convert user message to multimodal format
-    if include_images and frames_dir is not None:
-        meta_id = example.get("meta_id", "")
-        if meta_id:
-            frame_paths = get_frame_paths(frames_dir, str(meta_id))
-            
-            if frame_paths:
-                # Find user message and convert to multimodal
-                for i, msg in enumerate(msgs):
-                    if msg["role"] == "user":
-                        original_content = msg["content"]
-                        
-                        # Handle case where content is already a list (from JSONL with images)
-                        if isinstance(original_content, list):
-                            # Already multimodal, keep as-is
-                            continue
-                        
-                        # Build multimodal content
-                        content_parts = []
-                        
-                        # Add images first
-                        for frame_path in frame_paths:
-                            encoded = encode_image_base64(frame_path)
-                            if encoded:
-                                content_parts.append({
-                                    "type": "image_url",
-                                    "image_url": {"url": encoded}
-                                })
-                        
-                        # Add text content
-                        if original_content:
-                            content_parts.append({
-                                "type": "text",
-                                "text": original_content
-                            })
-                        
-                        # Only update if we added images
-                        if any(p.get("type") == "image_url" for p in content_parts):
-                            msgs[i] = {"role": "user", "content": content_parts}
-                        
-                        break  # Only process first user message
     
     return msgs
 
@@ -243,10 +195,8 @@ async def one_example(idx: int,
                       retry_on_trunc: bool,
                       growth: float,
                       max_tokens_cap: int,
-                      effort: str,
-                      include_images: bool = False,
-                      frames_dir: Path | None = None) -> dict:
-    msgs = prompt_messages(ex, frames_dir=frames_dir, include_images=include_images)
+                      effort: str) -> dict:
+    msgs = prompt_messages(ex)
     meta_id = ex.get("meta_id", str(idx))  # Extract meta_id from example, fallback to idx
     cur_tokens = max_tokens
     attempt = 0
@@ -314,21 +264,9 @@ async def main(val_file: str,
                retry_on_trunc: bool,
                growth: float,
                max_tokens_cap: int,
-               effort: str,
-               include_images: bool = False,
-               frames_dir: str | None = None):
+               effort: str):
     if not os.environ.get("TOGETHER_API_KEY"):
         raise SystemExit("Please export TOGETHER_API_KEY")
-    
-    # Validate image arguments
-    frames_path = None
-    if include_images:
-        if not frames_dir:
-            raise SystemExit("[error] --frames-dir is required when --include-images is set")
-        frames_path = Path(frames_dir)
-        if not frames_path.exists():
-            raise SystemExit(f"[error] Frames directory does not exist: {frames_dir}")
-        print(f"[info] Including images from: {frames_dir}")
     
     data = load_jsonl(val_file)
     
@@ -366,7 +304,7 @@ async def main(val_file: str,
                 temperature=temperature, max_tokens=max_tokens, retries=retries,
                 base_sleep=base_sleep, timeout_s=timeout_s,
                 retry_on_trunc=retry_on_trunc, growth=growth, max_tokens_cap=max_tokens_cap,
-                effort=effort, include_images=include_images, frames_dir=frames_path)
+                effort=effort)
 
     t0 = time.time()
     results = await asyncio.gather(*[runner(i, ex) for i, ex in enumerate(data)])
@@ -399,12 +337,6 @@ if __name__ == "__main__":
     ap.add_argument("--growth", type=float, default=1.8, help="Growth factor for max_tokens on truncation")
     ap.add_argument("--effort", default="low", choices=["low", "medium", "high"],
                     help="reasoning effort sent to the API (models may ignore)")
-    
-    # Vision support
-    ap.add_argument("--include-images", action="store_true",
-                    help="Include video frames in user messages for vision models")
-    ap.add_argument("--frames-dir", type=str, default=None,
-                    help="Directory containing frame folders (required if --include-images is set)")
 
     args = ap.parse_args()
     asyncio.run(main(
@@ -414,5 +346,4 @@ if __name__ == "__main__":
         limit=args.limit, skip=args.skip, transport=args.transport, timeout_s=args.per_call_timeout,
         warmup=args.warmup, retry_on_trunc=args.retry_on_trunc,
         growth=args.growth, max_tokens_cap=args.max_tokens_cap,
-        effort=args.effort, include_images=args.include_images,
-        frames_dir=args.frames_dir))
+        effort=args.effort))
