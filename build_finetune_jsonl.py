@@ -8,6 +8,7 @@ Key Features:
 - Input: Single CSV/Parquet with labels + text content (already merged)
 - Output: JSONL with OpenAI chat format
 - Supports 3 labeling modes: standard (3-dim), comprehensive numeric (8-dim), comprehensive categorical (10-dim)
+- Supports per-group prompts for comprehensive mode (--group-mode)
 
 Usage Examples:
     # Standard 3-dimension mode
@@ -18,6 +19,9 @@ Usage Examples:
 
     # Comprehensive categorical mode (10 dimensions, categorical labels)
     python build_finetune_jsonl.py --input data/merged.csv --output data/val.jsonl --comprehensive
+
+    # Per-group comprehensive mode (splits into 4 groups by category)
+    python build_finetune_jsonl.py --input data/merged.csv --output data/val.jsonl --comprehensive --group-mode by-category
 
     # Inference mode (no gold labels)
     python build_finetune_jsonl.py --input data/unlabeled.csv --output data/inference.jsonl --no-labels
@@ -32,7 +36,8 @@ Input file requirements:
 
 Output JSONL format:
 {
-  "meta_id": "...",
+  "meta_id": "...",  # or "{meta_id}__group_{group_id}" for group mode
+  "group_id": "...",  # optional, present in group mode
   "messages": [
     {"role": "system", "content": "..."},
     {"role": "user", "content": "TRANSCRIPT:...\\nDESCRIPTION:..."},
@@ -44,6 +49,12 @@ Labeling Modes:
 1. Standard (default): 3 dimensions - china_stance_score (float), china_sensitive/collective_action (categorical)
 2. Numeric comprehensive (--comprehensive --numeric-labels): 8 dimensions, all numeric 0-1 scale
 3. Categorical comprehensive (--comprehensive): 10 dimensions with structured categorical labels
+
+Group Modes (for comprehensive only):
+- single (default): All dimensions in one prompt
+- by-category: 4 groups (A: China Attitudes, B: Political Sensitivity, C: Content Safety, D: Content Type)
+- binary: 2 groups (china-related, content analysis)
+- per-item: Each dimension as its own prompt
 """
 
 import json
@@ -51,16 +62,22 @@ import argparse
 
 import pandas as pd
 from json_utils import (
-    load_table, norm_cols, to_str_meta, clamp11, safe_text, 
+    load_table, norm_cols, to_str_meta, clamp11, safe_text,
     write_jsonl, is_valid_text
 )
+from prompt_groups import (
+    get_group_configs, generate_group_prompt, make_compound_id,
+    GroupConfig, DIMENSIONS
+)
 
-def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False) -> str:
+def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False,
+                      group: GroupConfig = None) -> str:
     """Generate system prompt for different labeling modes.
 
     Args:
         numeric_labels: If True, use numeric (0-1) labels instead of categorical (yes/no/cannot_determine)
         comprehensive: If True, use comprehensive analysis with additional content dimensions
+        group: Optional GroupConfig for per-group prompts (comprehensive mode only)
 
     Returns:
         System prompt string with appropriate labeling instructions
@@ -70,8 +87,13 @@ def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False)
         - (True, False): Standard 3-dimension numeric labeling
         - (False, True): Comprehensive 10-dimension categorical labeling
         - (True, True): Comprehensive 8-dimension numeric labeling
+        - With group: Focused prompt for specific dimension group
     """
-    
+
+    # If group is specified, use the group-specific prompt generator
+    if group is not None:
+        return generate_group_prompt(group, numeric_labels)
+
     if comprehensive:
         if numeric_labels:
             return (
@@ -225,8 +247,27 @@ def labelize_sensitive(value: float, thresh: float = 0.5) -> str:
         return "cannot_determine"
     return "yes" if float(value) >= thresh else "no"
 
-def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_text_len: int = 10, label_mode: bool = True, numeric_labels: bool = False, comprehensive: bool = False):
-    """Process single labeled file into JSONL format."""
+def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
+                 min_text_len: int = 10, label_mode: bool = True,
+                 numeric_labels: bool = False, comprehensive: bool = False,
+                 group_mode: str = "single"):
+    """Process single labeled file into JSONL format.
+
+    Args:
+        input_path: Input CSV or Parquet file
+        output_path: Output JSONL file
+        yn_thresh: Threshold for converting numeric labels to yes/no
+        min_text_len: Minimum combined text length to include row
+        label_mode: Include gold standard labels in output
+        numeric_labels: Use numeric labels instead of categorical
+        comprehensive: Use comprehensive content analysis prompt
+        group_mode: Grouping mode for comprehensive prompts ('single', 'by-category', 'binary', 'per-item')
+    """
+    # Validate group_mode is only used with comprehensive mode
+    if group_mode != "single" and not comprehensive:
+        print(f"[warning] --group-mode '{group_mode}' only applies to comprehensive mode, ignoring")
+        group_mode = "single"
+
     print(f"[info] Loading {input_path}")
     df = norm_cols(load_table(input_path))
     
@@ -273,63 +314,103 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5, min_
     print(f"[info] Using text columns: transcript='{transcript_col}', description='{desc_col}'")
     print(f"[info] Text filtering: minimum {min_text_len} characters combined text")
     print(f"[info] Processing {len(df)} rows")
-    
+
+    # Get group configurations
+    groups = None
+    if comprehensive and group_mode != "single":
+        groups = get_group_configs(group_mode)
+        print(f"[info] Group mode: {group_mode} ({len(groups)} groups: {list(groups.keys())})")
+    elif comprehensive:
+        # Single group with all dimensions
+        groups = get_group_configs("single")
+
     rows = []
     filtered_count = 0
-    
+
     for _, r in df.iterrows():
         meta_id = to_str_meta(r[meta_col])
         if not meta_id:
             filtered_count += 1
             continue
-            
+
         # Extract text content
         transcript = safe_text(r.get(transcript_col, "")) if transcript_col else ""
         description = safe_text(r.get(desc_col, "")) if desc_col else ""
         user_text = build_user_text(transcript, description)
-        
+
         # Check combined text length
         if not user_text.strip() or not is_valid_text(user_text, min_text_len):
             print(f"[warning] Insufficient text content for meta_id {meta_id} (< {min_text_len} chars), skipping")
             filtered_count += 1
             continue
-        
-        # Create messages
-        messages = [
-            {"role": "system", "content": get_system_prompt(numeric_labels, comprehensive)},
-            {"role": "user", "content": user_text}
-        ]
-        
-        # Add assistant message with gold labels only in label mode
-        if label_mode:
-            # Build gold JSON
-            stance = clamp11(r["china_stance_score"])
-            if pd.isna(stance):
-                print(f"[warning] Invalid stance score for meta_id {meta_id}, skipping")
-                filtered_count += 1
-                continue
-                
-            sensitive_label = labelize_sensitive(r["sensitive"], yn_thresh)
-            
-            gold = {
-                "china_stance_score": float(stance),
-                "china_sensitive": sensitive_label
-            }
-            
-            # Add collective_action if present
-            if "collective_action" in df.columns and not pd.isna(r["collective_action"]):
-                collective_label = labelize_sensitive(r["collective_action"], yn_thresh)
-                gold["collective_action"] = collective_label
-            
-            messages.append({"role": "assistant", "content": json.dumps(gold, ensure_ascii=False, separators=(",", ":"))})
-        
-        
-        rows.append({
-            "meta_id": meta_id,
-            "messages": messages
-        })
-    
-    print(f"[info] Successfully processed {len(rows)} examples")
+
+        # For comprehensive mode with groups, generate one entry per group
+        if comprehensive and groups:
+            for group_id, group in groups.items():
+                # Create messages with group-specific prompt
+                messages = [
+                    {"role": "system", "content": get_system_prompt(numeric_labels, comprehensive, group)},
+                    {"role": "user", "content": user_text}
+                ]
+
+                # Use compound ID only when multiple groups
+                if group_mode != "single":
+                    record_id = make_compound_id(meta_id, group_id)
+                else:
+                    record_id = meta_id
+
+                row_data = {
+                    "meta_id": record_id,
+                    "messages": messages
+                }
+
+                # Add group_id field for easier tracking
+                if group_mode != "single":
+                    row_data["group_id"] = group_id
+                    row_data["original_meta_id"] = meta_id
+
+                rows.append(row_data)
+        else:
+            # Standard mode (non-comprehensive)
+            messages = [
+                {"role": "system", "content": get_system_prompt(numeric_labels, comprehensive)},
+                {"role": "user", "content": user_text}
+            ]
+
+            # Add assistant message with gold labels only in label mode
+            if label_mode:
+                # Build gold JSON
+                stance = clamp11(r["china_stance_score"])
+                if pd.isna(stance):
+                    print(f"[warning] Invalid stance score for meta_id {meta_id}, skipping")
+                    filtered_count += 1
+                    continue
+
+                sensitive_label = labelize_sensitive(r["sensitive"], yn_thresh)
+
+                gold = {
+                    "china_stance_score": float(stance),
+                    "china_sensitive": sensitive_label
+                }
+
+                # Add collective_action if present
+                if "collective_action" in df.columns and not pd.isna(r["collective_action"]):
+                    collective_label = labelize_sensitive(r["collective_action"], yn_thresh)
+                    gold["collective_action"] = collective_label
+
+                messages.append({"role": "assistant", "content": json.dumps(gold, ensure_ascii=False, separators=(",", ":"))})
+
+            rows.append({
+                "meta_id": meta_id,
+                "messages": messages
+            })
+
+    # Calculate summary stats
+    source_records = len(df) - filtered_count
+    if comprehensive and groups and group_mode != "single":
+        print(f"[info] Successfully processed {source_records} source records into {len(rows)} entries ({len(groups)} groups per record)")
+    else:
+        print(f"[info] Successfully processed {len(rows)} examples")
     print(f"[info] Filtered out {filtered_count} rows due to missing/insufficient data")
     write_jsonl(output_path, rows)
 
@@ -337,7 +418,7 @@ def main():
     parser = argparse.ArgumentParser(description="Convert CSV/Parquet to JSONL format for training or inference")
     parser.add_argument("--input", required=True, help="Input CSV or Parquet file with text content")
     parser.add_argument("--output", required=True, help="Output JSONL file")
-    parser.add_argument("--yn-thresh", type=float, default=0.5, 
+    parser.add_argument("--yn-thresh", type=float, default=0.5,
                        help="Threshold for converting numeric labels to yes/no (default: 0.5)")
     parser.add_argument("--min-text-len", type=int, default=10,
                        help="Minimum combined text length to include row (default: 10)")
@@ -348,11 +429,26 @@ def main():
     parser.add_argument("--numeric-labels", action="store_true",
                        help="Use numeric labels (0-1) instead of categorical (yes/no/cannot_determine)")
     parser.add_argument("--comprehensive", action="store_true",
-                       help="Use comprehensive content analysis prompt with 8 dimensions including inauthentic content, hate speech, harmful content, derivative content, and news segments")
-    
+                       help="Use comprehensive content analysis prompt with 8-10 dimensions")
+    parser.add_argument("--group-mode", default="single",
+                       choices=["single", "by-category", "binary", "per-item"],
+                       help="Grouping mode for comprehensive prompts (default: single). "
+                            "by-category: 4 groups (China Attitudes, Political Sensitivity, Content Safety, Content Type). "
+                            "binary: 2 groups (China-related, Content Analysis). "
+                            "per-item: Each dimension as its own prompt.")
+
     args = parser.parse_args()
-    
-    process_file(args.input, args.output, args.yn_thresh, args.min_text_len, args.label_mode, args.numeric_labels, args.comprehensive)
+
+    process_file(
+        args.input,
+        args.output,
+        args.yn_thresh,
+        args.min_text_len,
+        args.label_mode,
+        args.numeric_labels,
+        args.comprehensive,
+        args.group_mode
+    )
 
 if __name__ == "__main__":
     main()

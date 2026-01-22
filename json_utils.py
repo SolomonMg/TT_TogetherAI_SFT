@@ -21,7 +21,7 @@ Example usage for merging predictions with CSV:
 """
 import json, re, os
 import pandas as pd
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 ALLOWED_YES_NO_CD = {"yes", "no", "cannot_determine"}
 ALLOWED_LANGS = ["english", "mandarin", "spanish", "other", "no_language"]
@@ -76,7 +76,7 @@ def gold_of(example: dict) -> dict:
     # Ground truth is the last assistant message's content (JSON string)
     return json.loads(example["messages"][-1]["content"])
 
-def prompt_messages(example: dict) -> list[dict]:
+def prompt_messages(example: dict) -> List[dict]:
     # Use dataset messages as-is, EXCEPT drop the gold assistant at the end
     msgs = example["messages"][:-1]
     # Keep only role+content (SDK doesn't need other keys)
@@ -287,7 +287,7 @@ def _last_balanced_anywhere(s: str):
             break
     return last
 
-def extract_json_best(text: str) -> tuple[dict, bool]:
+def extract_json_best(text: str) -> Tuple[dict, bool]:
     """whole → codefence+tail → last-balanced"""
     if not isinstance(text, str) or not text.strip():
         return {"invalid": True}, False

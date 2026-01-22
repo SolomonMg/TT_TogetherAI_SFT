@@ -32,7 +32,29 @@ quick-test: ## Quick test with 10 samples
 	python infer.py --val-file data/val_BAL.jsonl --model openai/gpt-oss-120b --out out/test.raw.jsonl --concurrency 2 --temperature 0 --max-tokens 128 --limit 10
 	python parse.py --raw out/test.raw.jsonl --out out/test.parsed.jsonl --print-bad 5
 
+# Per-group evaluation (by-category: 4 groups)
+eval-pergroup: ## Evaluate with per-group prompts (4 groups by category)
+	python build_finetune_jsonl.py --input data/nyu_rand_china.parquet --output data/nyu_rand_china_pergroup.jsonl --comprehensive --numeric-labels --no-labels --group-mode by-category
+	python infer.py --val-file data/nyu_rand_china_pergroup.jsonl --model openai/gpt-oss-120b --out out/nyu_rand_china_pergroup.raw.jsonl --concurrency 4 --temperature 0 --max-tokens 256 --retries 5
+	python parse.py --raw out/nyu_rand_china_pergroup.raw.jsonl --out out/nyu_rand_china_pergroup.parsed.jsonl --group-mode by-category --numeric-labels --print-bad 5
+	python merge_groups.py --input out/nyu_rand_china_pergroup.parsed.jsonl --output out/nyu_rand_china_pergroup_merged.jsonl --group-mode by-category
+
+# Per-group evaluation (binary: 2 groups)
+eval-binary-groups: ## Evaluate with binary group prompts (2 groups: China-related, Content)
+	python build_finetune_jsonl.py --input data/nyu_rand_china.parquet --output data/nyu_rand_china_binary.jsonl --comprehensive --numeric-labels --no-labels --group-mode binary
+	python infer.py --val-file data/nyu_rand_china_binary.jsonl --model openai/gpt-oss-120b --out out/nyu_rand_china_binary.raw.jsonl --concurrency 4 --temperature 0 --max-tokens 400 --retries 5
+	python parse.py --raw out/nyu_rand_china_binary.raw.jsonl --out out/nyu_rand_china_binary.parsed.jsonl --group-mode binary --numeric-labels --print-bad 5
+	python merge_groups.py --input out/nyu_rand_china_binary.parsed.jsonl --output out/nyu_rand_china_binary_merged.jsonl --group-mode binary
+
+# Quick per-group test (10 samples)
+quick-pergroup: ## Quick test of per-group mode with 10 samples
+	python build_finetune_jsonl.py --input data/nyu_rand_china.parquet --output data/test_pergroup.jsonl --comprehensive --numeric-labels --no-labels --group-mode by-category --min-text-len 10
+	head -40 data/test_pergroup.jsonl > data/test_pergroup_small.jsonl
+	python infer.py --val-file data/test_pergroup_small.jsonl --model openai/gpt-oss-120b --out out/test_pergroup.raw.jsonl --concurrency 2 --temperature 0 --max-tokens 256 --limit 40
+	python parse.py --raw out/test_pergroup.raw.jsonl --out out/test_pergroup.parsed.jsonl --group-mode by-category --numeric-labels --print-bad 5
+	python merge_groups.py --input out/test_pergroup.parsed.jsonl --output out/test_pergroup_merged.jsonl --group-mode by-category
+
 clean: ## Remove output files
 	rm -rf out/*.jsonl out/*.csv out/*.log
 
-.PHONY: help train-data val-data train eval-base nyu-rand-china quick-test clean
+.PHONY: help train-data val-data train eval-base nyu-rand-china quick-test eval-pergroup eval-binary-groups quick-pergroup clean

@@ -9,11 +9,20 @@ Takes raw model outputs produced by infer.py (JSONL with fields like
 lightly sanitizes common glitches, validates against the codebook schema,
 and writes a parsed JSONL with either the parsed object or a failure.
 
+Supports group-aware validation for per-group prompts (--group-mode).
+
 Usage
 -----
 python parse.py \
   --raw out/preds_base.raw.jsonl \
   --out out/preds_base.parsed.jsonl \
+  --print-bad 5
+
+# Group-aware parsing (validates only expected keys per group)
+python parse.py \
+  --raw out/preds_pergroup.raw.jsonl \
+  --out out/preds_pergroup.parsed.jsonl \
+  --group-mode by-category \
   --print-bad 5
 
 python parse.py \
@@ -39,6 +48,10 @@ python parse.py \
 
 import os, sys, json, re, argparse
 from json_utils import ALLOWED_YES_NO_CD, ALLOWED_LANGS, REQ_KEYS, load_jsonl
+from prompt_groups import (
+    get_group_configs, parse_compound_id, validate_group_schema,
+    GroupConfig, DIMENSIONS
+)
 
 # --- helpers -------------------------------------------------------------
 
@@ -57,8 +70,22 @@ def valid_yn_field(x) -> bool:
     except:
         return False
 
-def valid_schema(y: dict) -> bool:
+def valid_schema(y: dict, group: GroupConfig = None, numeric_labels: bool = False) -> bool:
+    """Validate schema, optionally for a specific group.
+
+    Args:
+        y: The parsed JSON object
+        group: Optional GroupConfig for partial validation (group mode)
+        numeric_labels: Whether numeric labels are expected (for group validation)
+
+    Returns:
+        True if valid, False otherwise
+    """
     if not isinstance(y, dict): return False
+
+    # If group is specified, use group-specific validation
+    if group is not None:
+        return validate_group_schema(y, group, numeric_labels)
 
     # Check for comprehensive categorical format (new)
     comprehensive_categorical_keys = {
@@ -78,6 +105,23 @@ def valid_schema(y: dict) -> bool:
                    "news_segments", "inauthentic_content", "derivative_content"]:
             if not valid_yn_field(y.get(key)):
                 return False
+        return True
+
+    # Check for partial group match (any subset of comprehensive keys)
+    # This handles outputs from group-mode where only some dimensions are present
+    all_comprehensive_keys = set(DIMENSIONS.keys())
+    present_keys = set(y.keys()) & all_comprehensive_keys
+    if present_keys and not comprehensive_categorical_keys.issubset(y.keys()):
+        # Partial comprehensive output - validate only present keys
+        allowed_stance_values = {"pro", "anti", "neutral", "cannot_determine"}
+        stance_keys = {"china_ccp_government", "china_people_culture", "china_technology_development"}
+        for key in present_keys:
+            if key in stance_keys:
+                if y.get(key) not in allowed_stance_values:
+                    return False
+            else:
+                if not valid_yn_field(y.get(key)):
+                    return False
         return True
 
     # Check for traditional format (legacy)
@@ -401,13 +445,18 @@ def standardize_json_keys(obj: dict) -> dict:
 
     return standardized
 
-def extract_first_valid_json(text: str):
+def extract_first_valid_json(text: str, group: GroupConfig = None, numeric_labels: bool = False):
     """
     Strategy:
     1) If whole string parses as JSON -> validate -> return
     2) Strip code fences; find LAST balanced {...} block -> try parse (+fixes) -> validate
     3) Look for incomplete JSON at the end and try to complete it
     Returns (obj, ok:bool, mode:str)
+
+    Args:
+        text: Raw model output text
+        group: Optional GroupConfig for group-aware validation
+        numeric_labels: Whether numeric labels are expected
     """
     if not isinstance(text, str) or not text:
         return {"invalid": True}, False, "none"
@@ -416,7 +465,7 @@ def extract_first_valid_json(text: str):
     try:
         obj = try_parse_json_with_fixes(text.strip())
         obj = standardize_json_keys(obj)  # Standardize keys
-        if valid_schema(obj):
+        if valid_schema(obj, group, numeric_labels):
             return obj, True, "strict"
     except Exception:
         pass
@@ -426,7 +475,7 @@ def extract_first_valid_json(text: str):
     try:
         obj = try_parse_json_with_fixes(s.strip())
         obj = standardize_json_keys(obj)  # Standardize keys
-        if valid_schema(obj):
+        if valid_schema(obj, group, numeric_labels):
             return obj, True, "codefence_stripped"
     except Exception:
         pass
@@ -437,31 +486,39 @@ def extract_first_valid_json(text: str):
         try:
             obj = try_parse_json_with_fixes(cand)
             obj = standardize_json_keys(obj)  # Standardize keys
-            if valid_schema(obj):
+            if valid_schema(obj, group, numeric_labels):
                 return obj, True, "balanced_block"
         except Exception:
             pass
 
     # 4) Look for JSON-like patterns at the end of verbose output
     # Find patterns like: ..."china_stance_score":0.6,"china_sensitive":1.0
-    json_pattern = re.search(r'\{[^{}]*"china_stance_score"[^{}]*\}(?=[^{}]*$)', text, re.DOTALL)
-    if json_pattern:
-        try:
-            obj = try_parse_json_with_fixes(json_pattern.group(0))
-            obj = standardize_json_keys(obj)  # Standardize keys
-            if valid_schema(obj):
-                return obj, True, "pattern_match"
-        except Exception:
-            pass
+    # or any dimension key pattern for group mode
+    search_keys = ["china_stance_score", "china_ccp_government", "china_sensitive"]
+    if group:
+        search_keys = group.dimensions[:1]  # Use first dimension of group
+
+    for search_key in search_keys:
+        json_pattern = re.search(rf'\{{[^{{}}]*"{search_key}"[^{{}}]*\}}(?=[^{{}}]*$)', text, re.DOTALL)
+        if json_pattern:
+            try:
+                obj = try_parse_json_with_fixes(json_pattern.group(0))
+                obj = standardize_json_keys(obj)  # Standardize keys
+                if valid_schema(obj, group, numeric_labels):
+                    return obj, True, "pattern_match"
+            except Exception:
+                pass
 
     return {"invalid": True}, False, "none"
 
 # --- CLI ---------------------------------------------------------------
 
-def run(raw: str, out: str, print_bad: int = 0):
+def run(raw: str, out: str, print_bad: int = 0, group_mode: str = None, numeric_labels: bool = False):
     """
     raw: path to raw outputs JSONL (from infer.py)
     out: where to write parsed JSONL
+    group_mode: optional group mode for validation ('by-category', 'binary', 'per-item')
+    numeric_labels: whether numeric labels are expected
     """
     raw_recs = load_jsonl(raw)
     ok = 0
@@ -470,19 +527,57 @@ def run(raw: str, out: str, print_bad: int = 0):
     # truncate log
     open(bad_log, "w", encoding="utf-8").close()
 
+    # Get group configs if group_mode is specified
+    groups = None
+    if group_mode and group_mode != "single":
+        groups = get_group_configs(group_mode)
+        print(f"[info] Group-aware parsing mode: {group_mode} ({len(groups)} groups)")
+
     with open(out, "w", encoding="utf-8") as fw:
         for rec in raw_recs:
             idx = rec.get("idx")
             meta_id = rec.get("meta_id", str(idx))  # Extract meta_id, fallback to idx
             text = rec.get("raw", "")
-            obj, parsed, mode = extract_first_valid_json(text)
+
+            # Determine group for this record (from compound ID or record field)
+            group = None
+            original_meta_id = meta_id
+            group_id = rec.get("group_id")
+
+            if group_id is None:
+                # Try to parse from compound ID
+                original_meta_id, group_id = parse_compound_id(meta_id)
+
+            if groups and group_id and group_id in groups:
+                group = groups[group_id]
+
+            obj, parsed, mode = extract_first_valid_json(text, group, numeric_labels)
+
             if parsed:
                 ok += 1
-                out_rec = {"idx": idx, "meta_id": meta_id, "parsed": True, "raw": text, "json": obj}
+                out_rec = {
+                    "idx": idx,
+                    "meta_id": meta_id,
+                    "original_meta_id": original_meta_id,
+                    "parsed": True,
+                    "raw": text,
+                    "json": obj
+                }
+                if group_id:
+                    out_rec["group_id"] = group_id
             else:
-                out_rec = {"idx": idx, "meta_id": meta_id, "parsed": False, "raw": text, "json": None}
+                out_rec = {
+                    "idx": idx,
+                    "meta_id": meta_id,
+                    "original_meta_id": original_meta_id,
+                    "parsed": False,
+                    "raw": text,
+                    "json": None
+                }
+                if group_id:
+                    out_rec["group_id"] = group_id
                 with open(bad_log, "a", encoding="utf-8") as bl:
-                    bl.write(f"IDX={idx} META_ID={meta_id}\n{text}\n---\n")
+                    bl.write(f"IDX={idx} META_ID={meta_id} GROUP={group_id}\n{text}\n---\n")
             fw.write(json.dumps(out_rec, ensure_ascii=False) + "\n")
 
     total = len(raw_recs)
@@ -517,5 +612,10 @@ if __name__ == "__main__":
     ap.add_argument("--raw", required=True, help="Path to raw model outputs (from infer.py)")
     ap.add_argument("--out", required=True, help="Where to write parsed JSONL")
     ap.add_argument("--print-bad", type=int, default=0, help="Show first K bad outputs from bad_outputs.log")
+    ap.add_argument("--group-mode", default=None,
+                   choices=["single", "by-category", "binary", "per-item"],
+                   help="Group mode for validation (enables group-aware partial schema validation)")
+    ap.add_argument("--numeric-labels", action="store_true",
+                   help="Expect numeric labels instead of categorical")
     args = ap.parse_args()
-    run(**vars(args))
+    run(args.raw, args.out, args.print_bad, args.group_mode, args.numeric_labels)
