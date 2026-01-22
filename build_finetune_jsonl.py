@@ -512,7 +512,9 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
                 ]
 
                 if label_mode:
-                    messages.append({"role": "assistant", "content": json.dumps(gold, ensure_ascii=False, separators=(",", ":"))})
+                    # Filter gold labels to only include dimensions for this group
+                    group_gold = {k: v for k, v in gold.items() if k in group.dimensions}
+                    messages.append({"role": "assistant", "content": json.dumps(group_gold, ensure_ascii=False, separators=(",", ":"))})
 
                 if group_mode != "single":
                     record_id = make_compound_id(meta_id, group_id)
@@ -534,7 +536,7 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
                     rows.append(row_data)
         else:
             messages = [
-                {"role": "system", "content": get_system_prompt(numeric_labels, comprehensive, include_images=include_images)},
+                {"role": "system", "content": get_system_prompt(numeric_labels, comprehensive, group=None, include_images=include_images)},
                 {"role": "user", "content": user_content}
             ]
 

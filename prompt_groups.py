@@ -23,6 +23,7 @@ class LabelType(Enum):
     """Label type for a dimension."""
     STANCE = "stance"  # pro/anti/neutral
     BINARY = "binary"  # yes/no/cannot_determine
+    BINARY_STRICT = "binary_strict"  # yes/no only (no cannot_determine)
     NUMERIC_STANCE = "numeric_stance"  # float [-1, 1]
     NUMERIC_01 = "numeric_01"  # float [0, 1]
 
@@ -186,6 +187,18 @@ DIMENSIONS: Dict[str, DimensionSpec] = {
         format_categorical="'yes' | 'no' | 'cannot_determine'",
         format_numeric="a float in [0, 1] (0=no, 1=yes)"
     ),
+    "china_related": DimensionSpec(
+        key="china_related",
+        name="China Related",
+        description=(
+            "Label 'yes' if the video is related to the politics, culture, society, or economy of China. "
+            "Otherwise label 'no'."
+        ),
+        categorical_type=LabelType.BINARY_STRICT,
+        numeric_type=LabelType.NUMERIC_01,
+        format_categorical="'yes' | 'no'",
+        format_numeric="a float in [0, 1] (0=no, 1=yes)"
+    ),
 }
 
 
@@ -203,8 +216,8 @@ GROUPS_BY_CATEGORY: Dict[str, GroupConfig] = {
     "A": GroupConfig(
         id="A",
         name="China Attitudes",
-        dimensions=["china_ccp_government", "china_people_culture", "china_technology_development"],
-        description="Evaluate the video's stance toward different aspects of China."
+        dimensions=["china_related", "china_ccp_government", "china_people_culture", "china_technology_development"],
+        description="Determine if the video is China-related and evaluate its stance toward different aspects of China."
     ),
     "B": GroupConfig(
         id="B",
@@ -230,8 +243,8 @@ GROUPS_BINARY: Dict[str, GroupConfig] = {
     "china": GroupConfig(
         id="china",
         name="China-Related",
-        dimensions=["china_ccp_government", "china_people_culture", "china_technology_development", "china_sensitive", "collective_action"],
-        description="Evaluate China-related attitudes and political sensitivity."
+        dimensions=["china_related", "china_ccp_government", "china_people_culture", "china_technology_development", "china_sensitive", "collective_action"],
+        description="Determine if the video is China-related, evaluate China-related attitudes and political sensitivity."
     ),
     "content": GroupConfig(
         id="content",
@@ -416,8 +429,17 @@ def validate_group_schema(obj: dict, group: GroupConfig, numeric_labels: bool = 
         else:
             # Categorical validation
             if dim.categorical_type == LabelType.STANCE:
-                if value not in {"pro", "anti", "neutral", "cannot_determine"}:
+                if value not in {"pro", "anti", "neutral", "neutral/unclear", "cannot_determine"}:
                     return False
+            elif dim.categorical_type == LabelType.BINARY_STRICT:
+                if value not in {"yes", "no"}:
+                    # Also accept numeric values for backward compatibility
+                    try:
+                        f = float(value)
+                        if not (0.0 <= f <= 1.0):
+                            return False
+                    except (TypeError, ValueError):
+                        return False
             elif dim.categorical_type == LabelType.BINARY:
                 if value not in {"yes", "no", "cannot_determine"}:
                     # Also accept numeric values for backward compatibility

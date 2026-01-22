@@ -140,7 +140,7 @@ def valid_schema(y: dict, group: GroupConfig = None, numeric_labels: bool = Fals
     present_keys = set(y.keys()) & all_comprehensive_keys
     if present_keys and not comprehensive_categorical_keys.issubset(y.keys()):
         # Partial comprehensive output - validate only present keys
-        allowed_stance_values = {"pro", "anti", "neutral", "cannot_determine"}
+        allowed_stance_values = {"pro", "anti", "neutral", "neutral/unclear", "cannot_determine"}
         stance_keys = {"china_ccp_government", "china_people_culture", "china_technology_development"}
         for key in present_keys:
             if key in stance_keys:
