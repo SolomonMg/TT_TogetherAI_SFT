@@ -165,6 +165,57 @@ def f1_yes(gold_labels: List[str], pred_labels: List[str]) -> float:
     )
     return float(f1)
 
+def normalize_cd_label(x: Any) -> str:
+    v = str(x).strip().lower()
+    if v in {"", "nan", "none", "n/a"}:
+        return "n/a"
+    if v in {"cannot_determine", "cannot determine", "cannot-determine", "cant_determine", "cd", "uncertain"}:
+        return "cannot_determine"
+    if v in {"yes", "y", "true", "1"}:
+        return "yes"
+    if v in {"no", "n", "false", "0"}:
+        return "no"
+    if v in {"neutral", "unclear", "neutral/unclear"}:
+        return "neutral/unclear"
+    return v
+
+def multiclass_f1(gold_labels: List[str], pred_labels: List[str], labels: List[str]) -> Dict[str, float]:
+    g = [normalize_cd_label(x) for x in gold_labels]
+    p = [normalize_cd_label(x) for x in pred_labels]
+    # Filter to rows where gold is in the label set
+    keep = [i for i, gv in enumerate(g) if gv in labels]
+    if not keep:
+        return {f"f1_{lab}": np.nan for lab in labels} | {"f1_macro": np.nan}
+    g_f = [g[i] for i in keep]
+    p_f = [p[i] for i in keep]
+    _, _, f1s, _ = precision_recall_fscore_support(
+        g_f, p_f, labels=labels, average=None, zero_division=0
+    )
+    f1_macro = float(np.nanmean(f1s)) if len(f1s) else np.nan
+    out = {f"f1_{lab}": float(val) for lab, val in zip(labels, f1s)}
+    out["f1_macro"] = f1_macro
+    return out
+
+def bootstrap_ci(metric_fn, n: int, alpha: float, rng: np.random.Generator) -> Dict[str, tuple]:
+    """Return {metric: (lo, hi)} from bootstrap samples."""
+    samples = []
+    for _ in range(n):
+        samples.append(metric_fn())
+    if not samples:
+        return {}
+    keys = samples[0].keys()
+    out = {}
+    for k in keys:
+        vals = np.array([s.get(k, np.nan) for s in samples], dtype=float)
+        vals = vals[~np.isnan(vals)]
+        if vals.size == 0:
+            out[k] = (np.nan, np.nan)
+            continue
+        lo = np.quantile(vals, alpha / 2)
+        hi = np.quantile(vals, 1 - alpha / 2)
+        out[k] = (float(lo), float(hi))
+    return out
+
 def r2_on_arrays(g_nums, p_nums):
     g = np.array(g_nums, dtype=float)
     p = np.array(p_nums, dtype=float)
@@ -206,13 +257,17 @@ def score_comprehensive(
     yn_metric: str,
     cd_map: Dict[str, float],
     yn_thresh: float | None,
+    ci: bool = False,
+    ci_n: int = 1000,
+    ci_alpha: float = 0.05,
+    ci_seed: int | None = None,
 ) -> pd.DataFrame:
     """Score models on comprehensive 11-dimension format.
     
     Metrics computed:
-    - Accuracy for china_related (yes/no binary)
-    - F1 scores for each yes/no dimension
-    - Accuracy for stance dimensions (gov, culture, tech) - 3-way classification
+    - F1 for china_related (binary yes vs not-yes)
+    - F1 for yes/no dimensions (binary yes vs not-yes)
+    - 3-class F1 (pro/anti/neutral/unclear) for stance dimensions, plus macro-F1
     """
     rows = []
     
@@ -264,53 +319,80 @@ def score_comprehensive(
         
         # Compute metrics
         row = {"model": mname}
-        
-        # Binary accuracy for china_related
-        def accuracy(gold, pred):
-            if not gold:
-                return np.nan
-            correct = sum(1 for g, p in zip(gold, pred) if g == p and g in ["yes", "no"])
-            total = sum(1 for g in gold if g in ["yes", "no"])
-            return correct / total if total > 0 else np.nan
-        
-        # Stance accuracy for 3-way classification
-        def stance_accuracy(gold, pred):
-            if not gold:
-                return np.nan
-            # Valid stance values, plus handling for when china_related="no"
-            valid_stance = {"pro", "anti", "neutral/unclear"}
-            # Normalize empty values - treat "nan", "NaN", "", etc. as the same
-            def normalize(val):
-                v = str(val).strip().lower()
-                if v in {"nan", ""}:
-                    return "n/a"  # Use a consistent marker for N/A
-                return v
-            
-            gold_norm = [normalize(g) for g in gold]
-            pred_norm = [normalize(p) for p in pred]
-            
-            correct = sum(1 for g, p in zip(gold_norm, pred_norm) 
-                         if g == p and (g in valid_stance or g == "n/a"))
-            total = sum(1 for g in gold_norm if g in valid_stance or g == "n/a")
-            return correct / total if total > 0 else np.nan
-        
-        row["china_related_acc"] = accuracy(gold_china_related, pred_china_related)
-        
-        # F1 scores for yes/no dimensions
-        # china_sensitive should exclude N/A (when china_related="no")
-        row["sensitive_F1"] = f1_yes(gold_sensitive, pred_sensitive)
-        # General content dimensions apply to all videos
-        row["collective_F1"] = f1_yes(gold_collective, pred_collective)
-        row["hate_F1"] = f1_yes(gold_hate, pred_hate)
-        row["harmful_F1"] = f1_yes(gold_harmful, pred_harmful)
-        row["news_F1"] = f1_yes(gold_news, pred_news)
-        row["inauthentic_F1"] = f1_yes(gold_inauthentic, pred_inauthentic)
-        row["derivative_F1"] = f1_yes(gold_derivative, pred_derivative)
-        
-        # Accuracy for stance dimensions (3-way classification)
-        row["stance_gov_acc"] = stance_accuracy(gold_stance_gov, pred_stance_gov)
-        row["stance_culture_acc"] = stance_accuracy(gold_stance_culture, pred_stance_culture)
-        row["stance_tech_acc"] = stance_accuracy(gold_stance_tech, pred_stance_tech)
+
+        def compute_metrics(indices: List[int] | None = None) -> Dict[str, float]:
+            if indices is None:
+                g_rel, p_rel = gold_china_related, pred_china_related
+                g_sens, p_sens = gold_sensitive, pred_sensitive
+                g_coll, p_coll = gold_collective, pred_collective
+                g_hate, p_hate = gold_hate, pred_hate
+                g_harm, p_harm = gold_harmful, pred_harmful
+                g_news, p_news = gold_news, pred_news
+                g_inauth, p_inauth = gold_inauthentic, pred_inauthentic
+                g_deriv, p_deriv = gold_derivative, pred_derivative
+                g_gov, p_gov = gold_stance_gov, pred_stance_gov
+                g_cult, p_cult = gold_stance_culture, pred_stance_culture
+                g_tech, p_tech = gold_stance_tech, pred_stance_tech
+            else:
+                g_rel = [gold_china_related[i] for i in indices]
+                p_rel = [pred_china_related[i] for i in indices]
+                g_sens = [gold_sensitive[i] for i in indices]
+                p_sens = [pred_sensitive[i] for i in indices]
+                g_coll = [gold_collective[i] for i in indices]
+                p_coll = [pred_collective[i] for i in indices]
+                g_hate = [gold_hate[i] for i in indices]
+                p_hate = [pred_hate[i] for i in indices]
+                g_harm = [gold_harmful[i] for i in indices]
+                p_harm = [pred_harmful[i] for i in indices]
+                g_news = [gold_news[i] for i in indices]
+                p_news = [pred_news[i] for i in indices]
+                g_inauth = [gold_inauthentic[i] for i in indices]
+                p_inauth = [pred_inauthentic[i] for i in indices]
+                g_deriv = [gold_derivative[i] for i in indices]
+                p_deriv = [pred_derivative[i] for i in indices]
+                g_gov = [gold_stance_gov[i] for i in indices]
+                p_gov = [pred_stance_gov[i] for i in indices]
+                g_cult = [gold_stance_culture[i] for i in indices]
+                p_cult = [pred_stance_culture[i] for i in indices]
+                g_tech = [gold_stance_tech[i] for i in indices]
+                p_tech = [pred_stance_tech[i] for i in indices]
+
+            out = {}
+            out["china_related_F1"] = f1_yes(g_rel, p_rel)
+            out["sensitive_F1"] = f1_yes(g_sens, p_sens)
+            out["collective_F1"] = f1_yes(g_coll, p_coll)
+            out["hate_F1"] = f1_yes(g_hate, p_hate)
+            out["harmful_F1"] = f1_yes(g_harm, p_harm)
+            out["news_F1"] = f1_yes(g_news, p_news)
+            out["inauthentic_F1"] = f1_yes(g_inauth, p_inauth)
+            out["derivative_F1"] = f1_yes(g_deriv, p_deriv)
+
+            stance_labels = ["pro", "anti", "neutral/unclear"]
+            for prefix, g, p in [
+                ("stance_gov", g_gov, p_gov),
+                ("stance_culture", g_cult, p_cult),
+                ("stance_tech", g_tech, p_tech),
+            ]:
+                f1s = multiclass_f1(g, p, stance_labels)
+                out[f"{prefix}_f1_pro"] = f1s["f1_pro"]
+                out[f"{prefix}_f1_anti"] = f1s["f1_anti"]
+                out[f"{prefix}_f1_neutral"] = f1s["f1_neutral/unclear"]
+                out[f"{prefix}_f1_macro"] = f1s["f1_macro"]
+            return out
+
+        metrics = compute_metrics()
+        row.update(metrics)
+
+        if ci:
+            rng = np.random.default_rng(ci_seed)
+            n_items = len(val)
+            def sample_metrics():
+                idx = rng.integers(0, n_items, size=n_items).tolist()
+                return compute_metrics(indices=idx)
+            cis = bootstrap_ci(sample_metrics, ci_n, ci_alpha, rng)
+            for k, (lo, hi) in cis.items():
+                row[f"{k}_ci_lo"] = lo
+                row[f"{k}_ci_hi"] = hi
         
         rows.append(row)
     
@@ -327,6 +409,10 @@ def score_models(
     yn_metric: str,
     cd_map_str: str,
     min_text_len: int = 0,
+    ci: bool = False,
+    ci_n: int = 1000,
+    ci_alpha: float = 0.05,
+    ci_seed: int | None = None,
 ) -> pd.DataFrame:
     val = load_val_examples(val_file)
     
@@ -372,7 +458,7 @@ def score_models(
 
     # For comprehensive format, we can't compute stance metrics the same way
     if is_comprehensive:
-        return score_comprehensive(val, models, preds_by_model, yn_metric, cd_map, yn_thresh)
+        return score_comprehensive(val, models, preds_by_model, yn_metric, cd_map, yn_thresh, ci, ci_n, ci_alpha, ci_seed)
     
     # Gold fields (standard format)
     gold_stance = [clamp11(gold_of(ex)["china_stance_score"]) for ex in val]
@@ -477,6 +563,66 @@ def score_models(
                     pred = mmap.get(meta_id, {})
                     pred_collective_num.append(numeric_from_pred_or_label(pred, "collective_action", cd_map))
                 row["col_action_R2"] = r2_on_arrays(gold_collective_num, pred_collective_num)
+        if ci:
+            rng = np.random.default_rng(ci_seed)
+            n_items = len(val)
+            def compute_standard(indices: List[int] | None = None) -> Dict[str, float]:
+                if indices is None:
+                    g_st = gold_stance
+                    p_st = pred_stance
+                    g_sens = gold_sensitive
+                else:
+                    g_st = [gold_stance[i] for i in indices]
+                    p_st = [pred_stance[i] for i in indices]
+                    g_sens = [gold_sensitive[i] for i in indices]
+
+                out = {
+                    "stance_R2": stance_r2(g_st, p_st),
+                    "stance_pos_F1": stance_f1_positive(g_st, p_st),
+                    "stance_neg_F1": stance_f1_negative(g_st, p_st),
+                }
+
+                if yn_metric == "f1":
+                    if indices is None:
+                        pred_sens = pred_sensitive_labels
+                    else:
+                        pred_sens = [pred_sensitive_labels[i] for i in indices]
+                    out["ch_sensitive_F"] = f1_yes(g_sens, pred_sens)
+                    if has_collective_action:
+                        if indices is None:
+                            g_coll = gold_collective
+                            pred_coll = pred_collective_labels
+                        else:
+                            g_coll = [gold_collective[i] for i in indices]
+                            pred_coll = [pred_collective_labels[i] for i in indices]
+                        out["col_action_F"] = f1_yes(g_coll, pred_coll)
+                else:
+                    if indices is None:
+                        g_sens_num = gold_sensitive_num
+                        pred_sens_num = pred_sensitive_num
+                    else:
+                        g_sens_num = [gold_sensitive_num[i] for i in indices]
+                        pred_sens_num = [pred_sensitive_num[i] for i in indices]
+                    out["ch_sensitive_R2"] = r2_on_arrays(g_sens_num, pred_sens_num)
+                    if has_collective_action:
+                        if indices is None:
+                            g_coll_num = gold_collective_num
+                            pred_coll_num = pred_collective_num
+                        else:
+                            g_coll_num = [gold_collective_num[i] for i in indices]
+                            pred_coll_num = [pred_collective_num[i] for i in indices]
+                        out["col_action_R2"] = r2_on_arrays(g_coll_num, pred_coll_num)
+                return out
+
+            def sample_metrics():
+                idx = rng.integers(0, n_items, size=n_items).tolist()
+                return compute_standard(indices=idx)
+
+            cis = bootstrap_ci(sample_metrics, ci_n, ci_alpha, rng)
+            for k, (lo, hi) in cis.items():
+                row[f"{k}_ci_lo"] = lo
+                row[f"{k}_ci_hi"] = hi
+
         rows.append(row)
 
     df = pd.DataFrame(rows).set_index("model")
@@ -497,6 +643,14 @@ def main():
                     help="Mapping used when --yn-metric r2. Format: 'yes=1,no=0,cannot_determine=0.5'")
     ap.add_argument("--min-text-len", type=int, default=0,
                     help="Minimum text length to include example in evaluation (default: 0, no filtering)")
+    ap.add_argument("--ci", action="store_true",
+                    help="If set, compute bootstrap confidence intervals for metrics.")
+    ap.add_argument("--ci-n", type=int, default=1000,
+                    help="Number of bootstrap samples (default: 1000).")
+    ap.add_argument("--ci-alpha", type=float, default=0.05,
+                    help="Alpha for CI (default: 0.05 for 95%% CI).")
+    ap.add_argument("--ci-seed", type=int, default=None,
+                    help="Random seed for bootstrap sampling.")
     ap.add_argument("--out", help="Optional path to write the summary table CSV.")
     ap.add_argument("preds", nargs="+", help="One or more parsed prediction files (from parse.py).")
     args = ap.parse_args()
@@ -509,13 +663,35 @@ def main():
         yn_metric=args.yn_metric,
         cd_map_str=args.cd_map,
         min_text_len=args.min_text_len,
+        ci=args.ci,
+        ci_n=args.ci_n,
+        ci_alpha=args.ci_alpha,
+        ci_seed=args.ci_seed,
     )
 
     # Select columns that actually exist in the dataframe
     # Check if this is comprehensive format
-    if "china_related_acc" in df.columns:
-        # Comprehensive format - show all available metrics
-        cols = [c for c in df.columns if c != "model"]
+    if "china_related_F1" in df.columns:
+        # Comprehensive format - show ordered metrics
+        cols = [
+            "china_related_F1",
+            "sensitive_F1",
+            "collective_F1",
+            "hate_F1",
+            "harmful_F1",
+            "news_F1",
+            "inauthentic_F1",
+            "derivative_F1",
+        ]
+        stance_prefixes = ["stance_gov", "stance_culture", "stance_tech"]
+        for prefix in stance_prefixes:
+            cols.extend([
+                f"{prefix}_f1_pro",
+                f"{prefix}_f1_anti",
+                f"{prefix}_f1_neutral",
+                f"{prefix}_f1_macro",
+            ])
+        cols = [c for c in cols if c in df.columns]
     elif args.yn_metric == "f1":
         potential_cols = ["stance_R2","stance_pos_F1","stance_neg_F1","ch_sensitive_F","col_action_F"]
         cols = [c for c in potential_cols if c in df.columns]
@@ -523,11 +699,47 @@ def main():
         potential_cols = ["stance_R2","stance_pos_F1","stance_neg_F1","ch_sensitive_R2","col_action_R2"]
         cols = [c for c in potential_cols if c in df.columns]
 
-    print(df[cols].to_string(float_format=lambda x: f"{x:.3f}"))
+    ci_cols = []
+    if args.ci:
+        for c in cols:
+            lo = f"{c}_ci_lo"
+            hi = f"{c}_ci_hi"
+            if lo in df.columns and hi in df.columns:
+                ci_cols.extend([lo, hi])
+
+    # Pretty print: combine value + CI for readability
+    if args.ci and ci_cols:
+        display_df = df[cols].copy()
+        for c in cols:
+            lo = f"{c}_ci_lo"
+            hi = f"{c}_ci_hi"
+            if lo in df.columns and hi in df.columns:
+                display_df[c] = [
+                    f"{v:.3f} [{l:.3f}, {h:.3f}]"
+                    if pd.notna(v) and pd.notna(l) and pd.notna(h)
+                    else "nan"
+                    for v, l, h in zip(df[c].values, df[lo].values, df[hi].values)
+                ]
+        print(display_df.T.to_string())
+    else:
+        print(df[cols].T.to_string(float_format=lambda x: f"{x:.3f}"))
 
     if args.out:
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-        df[cols].to_csv(args.out)
+        out_rows = []
+        for model_name, row in df.iterrows():
+            for metric in cols:
+                lo = row.get(f"{metric}_ci_lo", np.nan)
+                hi = row.get(f"{metric}_ci_hi", np.nan)
+                out_rows.append({
+                    "model": model_name,
+                    "metric": metric,
+                    "score": row.get(metric, np.nan),
+                    "CI_low": lo,
+                    "CI_high": hi,
+                })
+        out_df = pd.DataFrame(out_rows)
+        out_df.to_csv(args.out, index=False)
         print(f"\nWrote summary CSV: {args.out}")
 
 if __name__ == "__main__":
