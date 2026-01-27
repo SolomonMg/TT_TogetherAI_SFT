@@ -49,12 +49,12 @@ DIMENSIONS: Dict[str, DimensionSpec] = {
             "Label the video's stance toward the CCP/PRC Government:\n"
             "• 'pro' - Supports or praises the CCP, PRC government, or leadership (e.g., 'China's system is more efficient than the West'). Supports PRC/CCP domestic or international policies or actions.\n"
             "• 'anti' - Criticizes or mocks the CCP, PRC leadership, or China's political system (e.g., censorship, authoritarianism). Against PRC/CCP domestic or international policies or actions.\n"
-            "• 'neutral' - No clear evaluative stance, or mixed views."
+            "• 'neutral/unclear' - No clear evaluative stance, or mixed views."
         ),
         categorical_type=LabelType.STANCE,
         numeric_type=LabelType.NUMERIC_STANCE,
-        format_categorical="'pro' | 'anti' | 'neutral'",
-        format_numeric="a float in [-1, 1] (-1=anti, 0=neutral, +1=pro)"
+        format_categorical="'pro' | 'anti' | 'neutral/unclear'",
+        format_numeric="a float in [-1, 1] (-1=anti, 0=neutral/unclear, +1=pro)"
     ),
     "china_people_culture": DimensionSpec(
         key="china_people_culture",
@@ -63,12 +63,12 @@ DIMENSIONS: Dict[str, DimensionSpec] = {
             "Label the video's stance toward Chinese People/Culture:\n"
             "• 'pro' - Positive portrayal of Chinese citizens, traditions, or cultural achievements (e.g., cuisine, festivals, kindness of people).\n"
             "• 'anti' - Negative generalizations or hostility toward Chinese individuals or culture (e.g., 'Chinese people are ...').\n"
-            "• 'neutral' - Cultural reference without judgment or sentiment not directed at people/culture."
+            "• 'neutral/unclear' - Cultural reference without judgment or sentiment not directed at people/culture."
         ),
         categorical_type=LabelType.STANCE,
         numeric_type=LabelType.NUMERIC_STANCE,
-        format_categorical="'pro' | 'anti' | 'neutral'",
-        format_numeric="a float in [-1, 1] (-1=anti, 0=neutral, +1=pro)"
+        format_categorical="'pro' | 'anti' | 'neutral/unclear'",
+        format_numeric="a float in [-1, 1] (-1=anti, 0=neutral/unclear, +1=pro)"
     ),
     "china_technology_development": DimensionSpec(
         key="china_technology_development",
@@ -77,12 +77,12 @@ DIMENSIONS: Dict[str, DimensionSpec] = {
             "Label the video's stance toward Chinese Technology/Development:\n"
             "• 'pro' - Praises Chinese technological progress, innovation, or infrastructure (e.g., 'China's AI development is impressive').\n"
             "• 'anti' - Criticizes Chinese technological products, companies, or policies (e.g., 'Huawei steals IP').\n"
-            "• 'neutral' - Mentions technology or development without evaluative tone."
+            "• 'neutral/unclear' - Mentions technology or development without evaluative tone."
         ),
         categorical_type=LabelType.STANCE,
         numeric_type=LabelType.NUMERIC_STANCE,
-        format_categorical="'pro' | 'anti' | 'neutral'",
-        format_numeric="a float in [-1, 1] (-1=anti, 0=neutral, +1=pro)"
+        format_categorical="'pro' | 'anti' | 'neutral/unclear'",
+        format_numeric="a float in [-1, 1] (-1=anti, 0=neutral/unclear, +1=pro)"
     ),
     "china_sensitive": DimensionSpec(
         key="china_sensitive",

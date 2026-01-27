@@ -332,7 +332,8 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
                  min_text_len: int = 10, label_mode: bool = True,
                  numeric_labels: bool = False, comprehensive: bool = False,
                  group_mode: str = "single",strip_meta_id: bool = False,
-                 include_images: bool = False, frames_dir: str | None = None):
+                 include_images: bool = False, frames_dir: str | None = None,
+                 merged_output_path: str | None = None):
     """Process single labeled file into JSONL format.
 
     Args:
@@ -345,6 +346,7 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
         comprehensive: Use comprehensive content analysis prompt
         group_mode: Grouping mode for comprehensive prompts ('single', 'by-category', 'binary', 'per-item')
         strip_meta_id: omit meta_id column in output (Together FT rejects extra top-level keys)
+        merged_output_path: optional path to also write a merged (non-grouped) JSONL when using group_mode
     """
     # Validate group_mode is only used with comprehensive mode
     if group_mode != "single" and not comprehensive:
@@ -436,6 +438,8 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
         groups = get_group_configs("single")
 
     rows = []
+    write_merged = bool(comprehensive and group_mode != "single" and merged_output_path)
+    merged_rows = [] if write_merged else None
     filtered_count = 0
 
     def build_gold_labels(row: pd.Series) -> dict | None:
@@ -505,6 +509,23 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
                     filtered_count += 1
                     continue
 
+            # Also emit a merged (non-grouped) example if requested
+            if write_merged:
+                merged_messages = [
+                    {"role": "system", "content": get_system_prompt(numeric_labels, comprehensive, group=None, include_images=include_images)},
+                    {"role": "user", "content": user_content}
+                ]
+                if label_mode:
+                    merged_messages.append({"role": "assistant", "content": json.dumps(gold, ensure_ascii=False, separators=(",", ":"))})
+
+                if strip_meta_id:
+                    merged_rows.append({"messages": merged_messages})
+                else:
+                    merged_rows.append({
+                        "meta_id": meta_id,
+                        "messages": merged_messages
+                    })
+
             for group_id, group in groups.items():
                 messages = [
                     {"role": "system", "content": get_system_prompt(numeric_labels, comprehensive, group, include_images)},
@@ -565,6 +586,8 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
         print(f"[info] Successfully processed {len(rows)} examples")
     print(f"[info] Filtered out {filtered_count} rows due to missing/insufficient data")
     write_jsonl(output_path, rows)
+    if write_merged and merged_rows is not None:
+        write_jsonl(merged_output_path, merged_rows)
 
 def main():
     parser = argparse.ArgumentParser(description="Convert CSV/Parquet to JSONL format for training or inference")
@@ -594,9 +617,20 @@ def main():
                        help="Include video frames in user messages for vision models")
     parser.add_argument("--frames-dir", type=str, default=None,
                        help="Directory containing frame folders (required if --include-images is set)")
+    parser.add_argument("--merged-output", type=str, default=None,
+                       help="Optional path to write a merged (non-grouped) JSONL when --group-mode is not 'single'")
     
     args = parser.parse_args()
     
+    # Auto-derive merged output path for grouped comprehensive mode if not provided
+    merged_output = args.merged_output
+    if merged_output is None and args.comprehensive and args.group_mode != "single":
+        out_path = Path(args.output)
+        if out_path.suffix:
+            merged_output = str(out_path.with_name(f"{out_path.stem}_merged{out_path.suffix}"))
+        else:
+            merged_output = f"{args.output}_merged.jsonl"
+
     process_file(
         args.input,
         args.output,
@@ -609,6 +643,7 @@ def main():
         args.strip_meta_id,
         args.include_images,
         args.frames_dir,
+        merged_output,
     )
 
 if __name__ == "__main__":
