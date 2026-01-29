@@ -28,6 +28,8 @@ python run_sft.py \
 
   """
 import os
+import json
+import tempfile
 import time
 import argparse
 from typing import Optional, Dict, Any
@@ -38,13 +40,139 @@ except ImportError as e:
     raise SystemExit("Please `pip install together` first.") from e
 
 
+ALLOWED_TOP_LEVEL_KEYS = {"messages", "prompt", "completion", "text"}
+
+
+def _normalize_messages(messages, line_no: int, path: Optional[str], force_multimodal: bool):
+    if not isinstance(messages, list):
+        where = f" in {path}" if path else ""
+        raise SystemExit(f"'messages' must be a list on line {line_no}{where}.")
+
+    def is_multimodal_content(content):
+        return isinstance(content, list)
+
+    any_multimodal = any(is_multimodal_content(m.get("content")) for m in messages if isinstance(m, dict))
+
+    if not any_multimodal and not force_multimodal:
+        return messages
+
+    normalized = []
+    for m in messages:
+        if not isinstance(m, dict):
+            where = f" in {path}" if path else ""
+            raise SystemExit(f"Each message must be an object on line {line_no}{where}.")
+        content = m.get("content")
+        if isinstance(content, list):
+            normalized.append(m)
+            continue
+        if isinstance(content, str):
+            nm = dict(m)
+            nm["content"] = [{"type": "text", "text": content}]
+            normalized.append(nm)
+            continue
+        if content is None:
+            nm = dict(m)
+            nm["content"] = [{"type": "text", "text": ""}]
+            normalized.append(nm)
+            continue
+        where = f" in {path}" if path else ""
+        raise SystemExit(
+            f"Unsupported message content type on line {line_no}{where}: {type(content)}"
+        )
+    return normalized
+
+
+def _sanitize_jsonl(path: str) -> Optional[str]:
+    """
+    Create a sanitized JSONL file that drops unexpected top-level keys.
+    Returns the path to the sanitized file, or None if no changes were needed.
+    """
+    if not path.endswith(".jsonl"):
+        return None
+
+    changed = False
+    any_multimodal_in_file = False
+
+    # First pass: detect if any message uses multimodal content.
+    with open(path, "r", encoding="utf-8") as src:
+        for line_no, line in enumerate(src, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"Invalid JSON on line {line_no} in {path}: {exc}") from exc
+            if not isinstance(obj, dict):
+                raise SystemExit(f"Each JSONL line must be an object. Found {type(obj)} on line {line_no}.")
+            messages = obj.get("messages")
+            if isinstance(messages, list):
+                if any(isinstance(m, dict) and isinstance(m.get("content"), list) for m in messages):
+                    any_multimodal_in_file = True
+                    break
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix="sanitized_", suffix=".jsonl", dir=os.path.dirname(path))
+    os.close(tmp_fd)
+
+    with open(path, "r", encoding="utf-8") as src, open(tmp_path, "w", encoding="utf-8") as dst:
+        for line_no, line in enumerate(src, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"Invalid JSON on line {line_no} in {path}: {exc}") from exc
+
+            if not isinstance(obj, dict):
+                raise SystemExit(f"Each JSONL line must be an object. Found {type(obj)} on line {line_no}.")
+
+            keys = set(obj.keys())
+            # Preserve only supported keys; drop extras like meta_id.
+            if "messages" in obj:
+                filtered = {
+                    "messages": _normalize_messages(
+                        obj["messages"],
+                        line_no,
+                        path,
+                        force_multimodal=any_multimodal_in_file,
+                    )
+                }
+            else:
+                filtered = {k: obj[k] for k in keys.intersection(ALLOWED_TOP_LEVEL_KEYS)}
+
+            if set(filtered.keys()) != keys:
+                changed = True
+
+            if not filtered:
+                raise SystemExit(
+                    f"After filtering, line {line_no} has no supported keys. "
+                    f"Supported keys: {sorted(ALLOWED_TOP_LEVEL_KEYS)}"
+                )
+
+            dst.write(json.dumps(filtered, ensure_ascii=False) + "\n")
+
+    if not changed:
+        os.remove(tmp_path)
+        return None
+    return tmp_path
+
+
 def upload_file(client: Together, path: str) -> str:
     if not os.path.exists(path):
         raise FileNotFoundError(path)
-    print(f"Uploading: {path}")
-    up = client.files.upload(file=path)
+    sanitized_path = _sanitize_jsonl(path)
+    upload_path = sanitized_path or path
+    if sanitized_path:
+        print(f"Sanitized JSONL written to: {sanitized_path}")
+    print(f"Uploading: {upload_path}")
+    up = client.files.upload(file=upload_path)
     file_id = up.id
     print(f"  → File ID: {file_id}")
+    if sanitized_path:
+        try:
+            os.remove(sanitized_path)
+        except OSError:
+            pass
     return file_id
 
 

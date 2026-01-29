@@ -250,8 +250,8 @@ def get_system_prompt(numeric_labels: bool = False, comprehensive: bool = False,
             "• Use 'cannot_determine' when unsure. Do not add extra keys or prose."
         )
 
-def build_user_text(transcript: str, description: str) -> str:
-    """Combine transcript and description into user message format."""
+def build_user_text(transcript: str, description: str, embedded_text: str | None = None) -> str:
+    """Combine transcript, description, and optional embedded text into user message format."""
     parts = []
     
     # Include any non-empty text content
@@ -259,6 +259,8 @@ def build_user_text(transcript: str, description: str) -> str:
         parts.append(f"TRANSCRIPT:\n{transcript.strip()}")
     if description and description.strip():
         parts.append(f"DESCRIPTION:\n{description.strip()}")
+    if embedded_text and embedded_text.strip():
+        parts.append(f"EMBEDDED_TEXT:\n{embedded_text.strip()}")
         
     return "\n\n".join(parts)
 
@@ -266,6 +268,7 @@ def build_user_text(transcript: str, description: str) -> str:
 def build_user_content(
     transcript: str, 
     description: str, 
+    embedded_text: str | None = None,
     frames_dir: Path | None = None, 
     video_id: str | None = None,
     include_images: bool = False
@@ -283,7 +286,7 @@ def build_user_content(
         Either a plain string (text-only) or a list of content parts (multimodal)
     """
     # Build the text content
-    text_content = build_user_text(transcript, description)
+    text_content = build_user_text(transcript, description, embedded_text)
     
     if not include_images or frames_dir is None or video_id is None:
         return text_content
@@ -404,6 +407,7 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
     # Check for text content columns (flexible naming)
     transcript_col = None
     desc_col = None
+    embedded_col = None
     
     # Try different column name variations (prioritize exact matches)
     for col in df.columns:
@@ -412,6 +416,8 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
             transcript_col = col
         elif col_lower in ["meta_desc", "description", "processed_desc"]:
             desc_col = col
+        elif col_lower in ["embedded_text", "stickersonitem_stickertext"]:
+            embedded_col = col
 
     # Fallback to any column with "desc" if no exact match found
     if not desc_col:
@@ -424,7 +430,7 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
     if not transcript_col and not desc_col:
         raise SystemExit("[error] No text content columns found (need subtitle/transcript and/or meta_desc/description)")
     
-    print(f"[info] Using text columns: transcript='{transcript_col}', description='{desc_col}'")
+    print(f"[info] Using text columns: transcript='{transcript_col}', description='{desc_col}', embedded_text='{embedded_col}'")
     print(f"[info] Text filtering: minimum {min_text_len} characters combined text")
     print(f"[info] Processing {len(df)} rows")
 
@@ -484,7 +490,8 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
         # Extract text content
         transcript = safe_text(r.get(transcript_col, "")) if transcript_col else ""
         description = safe_text(r.get(desc_col, "")) if desc_col else ""
-        user_text = build_user_text(transcript, description)
+        embedded_text = safe_text(r.get(embedded_col, "")) if embedded_col else ""
+        user_text = build_user_text(transcript, description, embedded_text)
 
         # Check combined text length
         if not user_text.strip() or not is_valid_text(user_text, min_text_len):
@@ -493,7 +500,7 @@ def process_file(input_path: str, output_path: str, yn_thresh: float = 0.5,
             continue
         # Build user content (may include images if enabled)
         user_content = build_user_content(
-            transcript, description,
+            transcript, description, embedded_text,
             frames_dir=frames_path,
             video_id=meta_id,
             include_images=include_images
